@@ -35,9 +35,9 @@ ENV HOST=0.0.0.0
 EXPOSE 5001
 
 # Download data from Google Drive
-RUN gdown 1In9qAzV5t--rMmEH2R5miWpZ4IQStgFu \
-	&& unzip data.zip \
-	&& rm data.zip \
+RUN gdown 1js0HAwBpEcoRdT9nkGY0Mc5Falkpsonl \
+	&& unzip data_24_01.zip \
+	&& rm data_24_01.zip \
 	# Download Sentence Transformers model
 	&& python3 cache_model.py 
 

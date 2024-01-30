@@ -1,5 +1,5 @@
 """"
-Intented for use by Dockerfile; downloads pytorch model and caches it 
+Intended for use by Dockerfile; downloads pytorch model and caches it 
 in the image, so the download doesn't have to run when app starts.
 """
 
