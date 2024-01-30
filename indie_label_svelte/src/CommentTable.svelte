@@ -4,22 +4,18 @@
     import Button, { Label } from "@smui/button";
     import DataTable, { Head, Body, Row, Cell } from "@smui/data-table";
     import LinearProgress from '@smui/linear-progress';
-    import IconButton from '@smui/icon-button';
-    import { user } from './stores/cur_user_store.js';
+
+    import { model_chosen } from './stores/cur_model_store.js';
 
     export let mode;
     export let model_name;
+    export let cur_user;
 
     let to_label = {};
     let promise = Promise.resolve(null);
     let n_complete_ratings;
     let n_unsure_ratings;
-
-    // Get current user
-    let cur_user;
-    user.subscribe(value => {
-		cur_user = value;
-	});
+    let show_comments_labeled_count = false;
 
     function getCommentsToLabel(cur_mode, n) {
         if (cur_mode == "train") {
@@ -48,6 +44,7 @@
     }
 
     function handleTrainModelButton() {
+        getCompleteRatings();
         promise = getModel("train");
     }
 
@@ -91,11 +88,14 @@
             user: cur_user,
         };
         let params = new URLSearchParams(req_params).toString();
-        const response = await fetch("./get_personalized_model?" + params);
-        const text = await response.text();
-        const data = JSON.parse(text);
-        to_label = data["ratings_prev"];
-        console.log(data);
+        const data = await fetch("./get_personalized_model?" + params)
+            .then((r) => r.text())
+            .then(function (text) {
+                let data = JSON.parse(text);
+                to_label = data["ratings_prev"];
+                model_chosen.update((value) => model_name);
+                return data;
+            });
         return data;
     }
 </script>
@@ -221,12 +221,14 @@
     {/key}
 
     <div class="spacing_vert_40">
-        <Button on:click={handleTrainModelButton} variant="outlined" disabled={(!n_complete_ratings) || (n_complete_ratings < 40)}>
+        <Button on:click={handleTrainModelButton} variant="outlined">
             <Label>Train Model</Label>
         </Button>
+        {#if show_comments_labeled_count}
         <Button on:click={getCompleteRatings} variant="outlined">
             <Label>Get Number of Comments Labeled</Label>
         </Button>
+        {/if}
         <Button on:click={() => handleLoadCommentsButton(5)} variant="outlined">
             <Label>Fetch More Comments To Label</Label>
         </Button>

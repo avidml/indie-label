@@ -4,20 +4,14 @@
     import Button, { Label } from "@smui/button";
     import DataTable, { Head, Body, Row, Cell } from "@smui/data-table";
     import LinearProgress from '@smui/linear-progress';
-    import { user } from './stores/cur_user_store.js';
     import { model_chosen } from './stores/cur_model_store.js';
 
     export let topic;
     export let model_name = null;
+    export let cur_user;
 
     let to_label = {};
     let promise = Promise.resolve(null);
-
-    // Get current user
-    let cur_user;
-    user.subscribe(value => {
-		cur_user = value;
-	});
 
     // Get current model
     if (model_name == null) {
@@ -81,7 +75,6 @@
             topic: topic,
         };
 
-        console.log("topic training model name", model_name);
         let params = new URLSearchParams(req_params).toString();
         const response = await fetch("./get_personalized_model_topic?" + params); // TODO
         const text = await response.text();
@@ -90,7 +83,6 @@
         model_name = data["new_model_name"];
         model_chosen.update((value) => model_name);
 
-        console.log("topicTraining", data);
         return data;
     }
 </script>

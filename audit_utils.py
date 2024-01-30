@@ -23,6 +23,7 @@ import time
 from sentence_transformers import SentenceTransformer, util
 import torch
 from bertopic import BERTopic
+from datetime import date
 
 ########################################
 # PRE-LOADING
@@ -37,61 +38,39 @@ alt.renderers.enable('altair_saver', fmts=['vega-lite', 'png'])
 
 # Data-loading
 module_dir = "./"
-perf_dir = f"data/perf/"
-
-# # TEMP reset
-# with open(os.path.join(module_dir, "./data/all_model_names.pkl"), "wb") as f:
-#     all_model_names = []
-#     pickle.dump(all_model_names, f)
-# with open(f"./data/users_to_models.pkl", "wb") as f:
-#     users_to_models = {}
-#     pickle.dump(users_to_models, f)
-
-
-with open(os.path.join(module_dir, "data/ids_to_comments.pkl"), "rb") as f:
+with open(os.path.join(module_dir, "data/input/ids_to_comments.pkl"), "rb") as f:
     ids_to_comments = pickle.load(f)
-with open(os.path.join(module_dir, "data/comments_to_ids.pkl"), "rb") as f:
+with open(os.path.join(module_dir, "data/input/comments_to_ids.pkl"), "rb") as f:
     comments_to_ids = pickle.load(f)
-
-all_model_names = sorted([name for name in os.listdir(os.path.join(perf_dir)) if os.path.isdir(os.path.join(perf_dir, name))])
-comments_grouped_full_topic_cat = pd.read_pickle("data/comments_grouped_full_topic_cat2_persp.pkl")
-sys_eval_df = pd.read_pickle(os.path.join(module_dir, "data/split_data/sys_eval_df.pkl"))
-train_df = pd.read_pickle(os.path.join(module_dir, "data/split_data/train_df.pkl"))
+system_preds_df = pd.read_pickle("data/input/system_preds_df.pkl")
+sys_eval_df = pd.read_pickle(os.path.join(module_dir, "data/input/split_data/sys_eval_df.pkl"))
+train_df = pd.read_pickle(os.path.join(module_dir, "data/input/split_data/train_df.pkl"))
 train_df_ids = train_df["item_id"].unique().tolist()
-model_eval_df = pd.read_pickle(os.path.join(module_dir, "data/split_data/model_eval_df.pkl"))
-ratings_df_full = pd.read_pickle(os.path.join(module_dir, "data/ratings_df_full.pkl"))
+model_eval_df = pd.read_pickle(os.path.join(module_dir, "data/input/split_data/model_eval_df.pkl"))
+ratings_df_full = pd.read_pickle(os.path.join(module_dir, "data/input/ratings_df_full.pkl"))
+worker_info_df = pd.read_pickle("./data/input/worker_info_df.pkl")
 
-worker_info_df = pd.read_pickle("./data/worker_info_df.pkl")
-
-with open(f"./data/users_to_models.pkl", "rb") as f:
-    users_to_models = pickle.load(f)
-
-with open("data/perf_1000_topics.pkl", "rb") as f:
-    perf_1000_topics = pickle.load(f)
-with open("data/perf_1000_tox_cat.pkl", "rb") as f:
-    perf_1000_tox_cat = pickle.load(f)
-with open("data/perf_1000_tox_severity.pkl", "rb") as f:
-    perf_1000_tox_severity = pickle.load(f)
-with open("data/user_perf_metrics.pkl", "rb") as f:
-    user_perf_metrics = pickle.load(f)
-
-topic_ids = comments_grouped_full_topic_cat.topic_id
-topics = comments_grouped_full_topic_cat.topic
+topic_ids = system_preds_df.topic_id
+topics = system_preds_df.topic
 topic_ids_to_topics = {topic_ids[i]: topics[i] for i in range(len(topic_ids))}
 topics_to_topic_ids = {topics[i]: topic_ids[i] for i in range(len(topic_ids))}
-unique_topics_ids = sorted(comments_grouped_full_topic_cat.topic_id.unique())
+unique_topics_ids = sorted(system_preds_df.topic_id.unique())
 unique_topics = [topic_ids_to_topics[topic_id] for topic_id in range(len(topic_ids_to_topics) - 1)]
 
 def get_toxic_threshold():
     return TOXIC_THRESHOLD
 
-def get_all_model_names(user=None):
-    if (user is None) or (user not in users_to_models):
-        all_model_names = sorted([name for name in os.listdir(os.path.join(perf_dir)) if os.path.isdir(os.path.join(perf_dir, name))])
-        return all_model_names
+def get_user_model_names(user):
+    # Fetch the user's models
+    output_dir = f"./data/output"
+    users = [name for name in os.listdir(output_dir) if os.path.isdir(os.path.join(output_dir, name))]
+    if user not in users:
+        # User does not exist
+        return []
     else:
-        # Fetch the user's models
-        user_models = users_to_models[user]
+        # Fetch trained model names for the user
+        user_dir = f"./data/output/{user}"
+        user_models = [name for name in os.listdir(user_dir) if os.path.isdir(os.path.join(user_dir, name))]
         user_models.sort()
         return user_models
 
@@ -99,7 +78,7 @@ def get_unique_topics():
     return unique_topics
 
 def get_large_clusters(min_n):
-    counts_df = comments_grouped_full_topic_cat.groupby(by=["topic_id"]).size().reset_index(name='counts')
+    counts_df = system_preds_df.groupby(by=["topic_id"]).size().reset_index(name='counts')
     counts_df = counts_df[counts_df["counts"] >= min_n]
     return [topic_ids_to_topics[t_id] for t_id in sorted(counts_df["topic_id"].tolist()[1:])]
 
@@ -137,32 +116,64 @@ readable_to_internal = {
 }
 internal_to_readable = {v: k for k, v in readable_to_internal.items()}
 
-# Embeddings for neighbor retrieval
-model_name = "paraphrase-MiniLM-L6-v2"
-model = SentenceTransformer(model_name)
-with open("./data/comments.pkl", "rb") as f:
-    comments = pickle.load(f)
-embeddings = torch.load("./data/embeddings/21_10_embeddings.pt")
 
-# Perspective API recalibration
-def recalib_v1(s):
-    # convert Perspective score to 0-4 toxicity score
-    # map 0 persp to 0 (not at all toxic); 0.5 persp to 1 (slightly toxic), 1.0 persp to 4 (extremely toxic)
-    if s < 0.5:
-        return (s * 2.)
-    else:
-        return ((s - 0.5) * 6.) + 1
+########################################
+# Data storage helper functions
+# Set up all directories for new user
+def setup_user_dirs(cur_user):
+    user_dir = f"./data/output/{cur_user}"
+    if not os.path.isdir(user_dir):
+        os.mkdir(user_dir)
+def setup_model_dirs(cur_user, cur_model):
+    model_dir = f"./data/output/{cur_user}/{cur_model}"
+    if not os.path.isdir(model_dir):
+        os.mkdir(model_dir) # Set up model dir
+        # Set up subdirs
+        os.mkdir(os.path.join(model_dir, "labels"))
+        os.mkdir(os.path.join(model_dir, "perf"))
+def setup_user_model_dirs(cur_user, cur_model):
+    setup_user_dirs(cur_user)
+    setup_model_dirs(cur_user, cur_model)
 
-def recalib_v2(s):
-    # convert Perspective score to 0-4 toxicity score
-    # just 4x the perspective score 
-    return (s * 4.)
+# Charts
+def get_chart_file(cur_user, cur_model):
+    chart_dir = f"./data/output/{cur_user}/{cur_model}"
+    return os.path.join(chart_dir, f"chart_overall_vis.json")
 
-comments_grouped_full_topic_cat["rating_avg_orig"] = comments_grouped_full_topic_cat["rating"]
-comments_grouped_full_topic_cat["rating"] = [recalib_v2(score) for score in comments_grouped_full_topic_cat["persp_score"].tolist()]
+# Labels
+def get_label_dir(cur_user, cur_model):
+    return f"./data/output/{cur_user}/{cur_model}/labels"
+def get_n_label_files(cur_user, cur_model):
+    label_dir = get_label_dir(cur_user, cur_model)
+    return len([name for name in os.listdir(label_dir) if os.path.isfile(os.path.join(label_dir, name))])
+def get_label_file(cur_user, cur_model, label_i=None):
+    if label_i is None:
+        # Get index to add on to end of list
+        label_i = get_n_label_files(cur_user, cur_model)
+    label_dir = get_label_dir(cur_user, cur_model)
+    return os.path.join(label_dir, f"{label_i}.pkl")
 
-def get_comments_grouped_full_topic_cat():
-    return comments_grouped_full_topic_cat
+# Performance
+def get_perf_dir(cur_user, cur_model):
+    return f"./data/output/{cur_user}/{cur_model}/perf"
+def get_n_perf_files(cur_user, cur_model):
+    perf_dir = get_perf_dir(cur_user, cur_model)
+    return len([name for name in os.listdir(perf_dir) if os.path.isfile(os.path.join(perf_dir, name))])
+def get_perf_file(cur_user, cur_model, perf_i=None):
+    if perf_i is None:
+        # Get index to add on to end of list
+        perf_i = get_n_perf_files(cur_user, cur_model)
+    perf_dir = get_perf_dir(cur_user, cur_model)
+    return os.path.join(perf_dir, f"{perf_i}.pkl")
+
+# Predictions dataframe
+def get_preds_file(cur_user, cur_model):
+    preds_dir = f"./data/output/{cur_user}/{cur_model}"
+    return os.path.join(preds_dir, f"preds_df.pkl")
+
+# Reports
+def get_reports_file(cur_user, cur_model):
+    return f"./data/output/{cur_user}/{cur_model}/reports.json"
 
 ########################################
 # General utils
@@ -192,22 +203,6 @@ def my_bootstrap(vals, n_boot, alpha):
 
 ########################################
 # GET_AUDIT utils
-def other_users_perf(perf_metrics, metric, user_metric, alpha=0.95, n_boot=501):
-    ind = get_metric_ind(metric)
-    
-    metric_vals = [metric_vals[ind] for metric_vals in perf_metrics.values()]
-    metric_avg = np.median(metric_vals)
-    
-    # Future: use provided sample to perform bootstrap sampling
-    ci_1 = mne.stats.bootstrap_confidence_interval(np.array(metric_vals), ci=alpha, n_bootstraps=n_boot, stat_fun="median")
-    
-    bs_samples, ci = my_bootstrap(metric_vals, n_boot, alpha)
-    
-    # Get user's percentile
-    percentile = stats.percentileofscore(bs_samples, user_metric)
-    
-    return metric_avg, ci, percentile, metric_vals
-
 def plot_metric_histogram(metric, user_metric, other_metric_vals, n_bins=10):
     hist, bin_edges = np.histogram(other_metric_vals, bins=n_bins, density=False)
     data = pd.DataFrame({
@@ -239,394 +234,38 @@ def plot_metric_histogram(metric, user_metric, other_metric_vals, n_bins=10):
 
     return (bar + rule).interactive()
 
-def get_toxicity_severity_bins(perf_metric, user_df, other_dfs, bins=BINS, bin_labels=BIN_LABELS, ci=0.95, n_boot=501):
-    # Note: not using other_dfs anymore
-    y_user = []
-    y_other = []
-    used_bins = []
-    other_ci_low = []
-    other_ci_high = []
-    for severity_i in range(len(bin_labels)):
-        metric_others = [metrics[get_metric_ind(perf_metric)] for metrics in perf_1000_tox_severity[severity_i].values() if metrics[get_metric_ind(perf_metric)]]
-        ci_low, ci_high = mne.stats.bootstrap_confidence_interval(np.array(metric_others), ci=ci, n_bootstraps=n_boot, stat_fun='median')
-        metric_other = np.median(metric_others)
-        
-        cur_user_df = user_df[user_df["prediction_bin"] == severity_i]
-        y_true_user = cur_user_df.pred.to_numpy()  # user's label
-        y_pred = cur_user_df.rating_avg.to_numpy()  # system's label (avg)
-        
-        if len(y_true_user) > 0:
-            used_bins.append(bin_labels[severity_i])
-            metric_user = calc_metric_user(y_true_user, y_pred, perf_metric)
-            y_user.append(metric_user)
-            y_other.append(metric_other)
-            other_ci_low.append(ci_low)
-            other_ci_high.append(ci_high)
-            
-    return y_user, y_other, used_bins, other_ci_low, other_ci_high
+# Generates the summary plot across all topics for the user
+def show_overall_perf(cur_model, error_type, cur_user, threshold=TOXIC_THRESHOLD, topic_vis_method="median", use_cache=True):
+    # Your perf (calculate using model and testset)    
+    preds_file = get_preds_file(cur_user, cur_model)
+    with open(preds_file, "rb") as f:
+        preds_df = pickle.load(f)
 
-def get_topic_bins(perf_metric, user_df, other_dfs, n_topics, ci=0.95, n_boot=501):  
-    # Note: not using other_dfs anymore
-    y_user = []
-    y_other = []
-    used_bins = []
-    other_ci_low = []
-    other_ci_high = []
-    selected_topics = unique_topics_ids[1:(n_topics + 1)]
-    
-    for topic_id in selected_topics:
-        cur_topic = topic_ids_to_topics[topic_id]
-        metric_others = [metrics[get_metric_ind(perf_metric)] for metrics in perf_1000_topics[topic_id].values() if metrics[get_metric_ind(perf_metric)]]
-        ci_low, ci_high = mne.stats.bootstrap_confidence_interval(np.array(metric_others), ci=ci, n_bootstraps=n_boot, stat_fun='median')
-        metric_other = np.median(metric_others)
-        
-        cur_user_df = user_df[user_df["topic"] == cur_topic]
-        y_true_user = cur_user_df.pred.to_numpy()  # user's label
-        y_pred = cur_user_df.rating_avg.to_numpy()  # system's label (avg)
-        
-        if len(y_true_user) > 0:
-            used_bins.append(cur_topic)
-            metric_user = calc_metric_user(y_true_user, y_pred, perf_metric)
-            y_user.append(metric_user)
-            y_other.append(metric_other)
-            other_ci_low.append(ci_low)
-            other_ci_high.append(ci_high)
-            
-    return y_user, y_other, used_bins, other_ci_low, other_ci_high
-
-def calc_metric_user(y_true_user, y_pred, perf_metric):
-    if perf_metric == "MAE":
-        metric_user = mean_absolute_error(y_true_user, y_pred)
-
-    elif perf_metric == "MSE":
-        metric_user = mean_squared_error(y_true_user, y_pred)
-
-    elif perf_metric == "RMSE":            
-        metric_user = mean_squared_error(y_true_user, y_pred, squared=False)
-        
-    elif perf_metric == "avg_diff":
-        metric_user = np.mean(y_true_user - y_pred)
-    
-    return metric_user
-
-def get_toxicity_category_bins(perf_metric, user_df, other_dfs, threshold=0.5, ci=0.95, n_boot=501):
-    # Note: not using other_dfs anymore; threshold from pre-calculation is 0.5
-    cat_cols = ["is_profane_frac", "is_threat_frac", "is_identity_attack_frac", "is_insult_frac", "is_sexual_harassment_frac"]
-    cat_labels = ["Profanity", "Threats", "Identity Attacks", "Insults", "Sexual Harassment"]
-    y_user = []
-    y_other = []
-    used_bins = []
-    other_ci_low = []
-    other_ci_high = []
-    for i, cur_col_name in enumerate(cat_cols):
-        metric_others = [metrics[get_metric_ind(perf_metric)] for metrics in perf_1000_tox_cat[cur_col_name].values() if metrics[get_metric_ind(perf_metric)]]
-        ci_low, ci_high = mne.stats.bootstrap_confidence_interval(np.array(metric_others), ci=ci, n_bootstraps=n_boot, stat_fun='median')
-        metric_other = np.median(metric_others)
-        
-        # Filter to rows where a comment received an average label >= the provided threshold for the category
-        cur_user_df = user_df[user_df[cur_col_name] >= threshold]
-        y_true_user = cur_user_df.pred.to_numpy()  # user's label
-        y_pred = cur_user_df.rating_avg.to_numpy()  # system's label (avg)
-        
-        if len(y_true_user) > 0:
-            used_bins.append(cat_labels[i])
-            metric_user = calc_metric_user(y_true_user, y_pred, perf_metric)
-            y_user.append(metric_user)
-            y_other.append(metric_other)
-            other_ci_low.append(ci_low)
-            other_ci_high.append(ci_high)
-    
-    return y_user, y_other, used_bins, other_ci_low, other_ci_high
-
-def plot_class_cond_results(preds_df, breakdown_axis, perf_metric, other_ids, sort_bars, n_topics, worker_id="A"):
-    # Note: preds_df already has binned results
-    # Prepare dfs
-    user_df = preds_df[preds_df.user_id == worker_id].sort_values(by=["item_id"]).reset_index()
-    other_dfs = [preds_df[preds_df.user_id == other_id].sort_values(by=["item_id"]).reset_index() for other_id in other_ids]
-    
-    if breakdown_axis == "toxicity_severity":
-        y_user, y_other, used_bins, other_ci_low, other_ci_high = get_toxicity_severity_bins(perf_metric, user_df, other_dfs)
-    elif breakdown_axis == "topic":
-        y_user, y_other, used_bins, other_ci_low, other_ci_high = get_topic_bins(perf_metric, user_df, other_dfs, n_topics)
-    elif breakdown_axis == "toxicity_category":
-        y_user, y_other, used_bins, other_ci_low, other_ci_high = get_toxicity_category_bins(perf_metric, user_df, other_dfs)
-    
-    diffs = list(np.array(y_user) - np.array(y_other))
-        
-    # Generate bar chart
-    data = pd.DataFrame({
-        "metric_val": y_user + y_other,
-        "Labeler": ["You" for _ in range(len(y_user))] + ["Other users" for _ in range(len(y_user))],
-        "used_bins": used_bins + used_bins,
-        "diffs": diffs + diffs,
-        "lower_cis": y_user + other_ci_low,
-        "upper_cis": y_user + other_ci_high,
-    })
-
-    color_domain = ['You', 'Other users']
-    color_range = [YOUR_COLOR, OTHER_USERS_COLOR]
-    
-    base = alt.Chart()
-    chart_title=f"{internal_to_readable[breakdown_axis]} Results"
-    x_axis = alt.X("Labeler:O", sort=("You", "Other users"), title=None, axis=None)
-    y_axis = alt.Y("metric_val:Q", title=internal_to_readable[perf_metric])
-    if sort_bars:
-        col_content = alt.Column("used_bins:O", sort=alt.EncodingSortField(field="diffs", op="mean", order='descending'))
+    chart_file = get_chart_file(cur_user, cur_model)
+    if use_cache and os.path.isfile(chart_file):
+        # Read from file if it exists
+        with open(chart_file, "r") as f:
+            topic_overview_plot_json = json.load(f)
     else:
-        col_content = alt.Column("used_bins:O")
-
-    if n_topics is not None and n_topics > 10:
-        # Change to horizontal bar chart
-        bar = base.mark_bar(lineBreak="_").encode(
-            y=x_axis,
-            x=y_axis,
-            color=alt.Color("Labeler:O", scale=alt.Scale(domain=color_domain, range=color_range)),
-            tooltip=[
-                alt.Tooltip('Labeler:O', title='Labeler'),
-                alt.Tooltip('metric_val:Q', title=perf_metric, format=".3f"),
-            ]
-        )
-        error_bars = base.mark_errorbar().encode(
-            y=x_axis,
-            x = alt.X("lower_cis:Q", title=internal_to_readable[perf_metric]),
-            x2 = alt.X2("upper_cis:Q", title=None),
-            tooltip=[
-              alt.Tooltip('lower_cis:Q', title='Lower CI', format=".3f"),
-              alt.Tooltip('upper_cis:Q', title='Upper CI', format=".3f"),
-            ]
-        )
-        combined = alt.layer(
-            bar, error_bars, data=data
-        ).facet(
-            row=col_content
-        ).properties(
-            title=chart_title,
-        ).interactive()
-    else:
-        bar = base.mark_bar(lineBreak="_").encode(
-            x=x_axis,
-            y=y_axis,
-            color=alt.Color("Labeler:O", scale=alt.Scale(domain=color_domain, range=color_range)),
-            tooltip=[
-                alt.Tooltip('Labeler:O', title='Labeler'),
-                alt.Tooltip('metric_val:Q', title=perf_metric, format=".3f"),
-            ]
-        )
-        error_bars = base.mark_errorbar().encode(
-            x=x_axis,
-            y = alt.Y("lower_cis:Q", title=internal_to_readable[perf_metric]),
-            y2 = alt.Y2("upper_cis:Q", title=None),
-            tooltip=[
-              alt.Tooltip('lower_cis:Q', title='Lower CI', format=".3f"),
-              alt.Tooltip('upper_cis:Q', title='Upper CI', format=".3f"),
-            ]
-        )
-        combined = alt.layer(
-            bar, error_bars, data=data
-        ).facet(
-            column=col_content
-        ).properties(
-            title=chart_title,
-        ).interactive()
-
-    return combined
-
-def show_overall_perf(variant, error_type, cur_user, threshold=TOXIC_THRESHOLD, breakdown_axis=None, topic_vis_method="median"):
-    # Your perf (calculate using model and testset)
-    breakdown_axis = readable_to_internal[breakdown_axis]
-    
-    if breakdown_axis is not None:
-        with open(os.path.join(module_dir, f"data/preds_dfs/{variant}.pkl"), "rb") as f:
-            preds_df = pickle.load(f)
-
-        # Read from file
-        chart_dir = "./data/charts"
-        chart_file = os.path.join(chart_dir, f"{cur_user}_{variant}.pkl")
-        if os.path.isfile(chart_file):
-            with open(chart_file, "r") as f:
-                topic_overview_plot_json = json.load(f)
-        else:
-            preds_df_mod = preds_df.merge(comments_grouped_full_topic_cat, on="item_id", how="left", suffixes=('_', '_avg'))
-            if topic_vis_method == "median":
-                preds_df_mod_grp = preds_df_mod.groupby(["topic_", "user_id"]).median()
-            elif topic_vis_method == "mean":
-                preds_df_mod_grp = preds_df_mod.groupby(["topic_", "user_id"]).mean()
-            topic_overview_plot_json = plot_overall_vis(preds_df=preds_df_mod_grp, n_topics=200, threshold=threshold, error_type=error_type, cur_user=cur_user, cur_model=variant)
+        # Otherwise, generate chart and save to file
+        if topic_vis_method == "median":  # Default
+            preds_df_grp = preds_df.groupby(["topic", "user_id"]).median()
+        elif topic_vis_method == "mean":
+            preds_df_grp = preds_df.groupby(["topic", "user_id"]).mean()
+        topic_overview_plot_json = plot_overall_vis(preds_df=preds_df_grp, n_topics=200, threshold=threshold, error_type=error_type, cur_user=cur_user, cur_model=cur_model)
+        # Save to file    
+        with open(chart_file, "w") as f:
+            json.dump(topic_overview_plot_json, f)
 
     return {
         "topic_overview_plot_json": json.loads(topic_overview_plot_json),
     }
 
 ########################################
-# GET_CLUSTER_RESULTS utils
-def get_overall_perf3(preds_df, perf_metric, other_ids, worker_id="A"):    
-    # Prepare dataset to calculate performance
-    # Note: true is user and pred is system
-    y_true = preds_df[preds_df["user_id"] == worker_id].pred.to_numpy()
-    y_pred_user = preds_df[preds_df["user_id"] == worker_id].rating_avg.to_numpy()
-    
-    y_true_others = y_pred_others = [preds_df[preds_df["user_id"] == other_id].pred.to_numpy() for other_id in other_ids]
-    y_pred_others = [preds_df[preds_df["user_id"] == other_id].rating_avg.to_numpy() for other_id in other_ids]
-    
-    # Get performance for user's model and for other users
-    if perf_metric == "MAE":
-        user_perf = mean_absolute_error(y_true, y_pred_user)
-        other_perfs = [mean_absolute_error(y_true_others[i], y_pred_others[i]) for i in range(len(y_true_others))]
-    elif perf_metric == "MSE":
-        user_perf = mean_squared_error(y_true, y_pred_user)
-        other_perfs = [mean_squared_error(y_true_others[i], y_pred_others[i]) for i in range(len(y_true_others))]
-    elif perf_metric == "RMSE":
-        user_perf = mean_squared_error(y_true, y_pred_user, squared=False)
-        other_perfs = [mean_squared_error(y_true_others[i], y_pred_others[i], squared=False) for i in range(len(y_true_others))]
-    elif perf_metric == "avg_diff":
-        user_perf = np.mean(y_true - y_pred_user)
-        other_perfs = [np.mean(y_true_others[i] - y_pred_others[i]) for i in range(len(y_true_others))]
-    
-    other_perf = np.mean(other_perfs)  # average across all other users
-    return user_perf, other_perf
-
-def style_color_difference(row):
-    full_opacity_diff = 3.
-    pred_user_col = "Your predicted rating"
-    pred_other_col = "Other users' predicted rating"
-    pred_system_col = "Status-quo system rating"
-    diff_user = row[pred_user_col] - row[pred_system_col]
-    diff_other = row[pred_other_col] - row[pred_system_col]
-    red = "234, 133, 125"
-    green = "142, 205, 162"
-    bkgd_user = green if diff_user < 0 else red  # red if more toxic; green if less toxic
-    opac_user = min(abs(diff_user / full_opacity_diff), 1.)
-    bkgd_other = green if diff_other < 0 else red  # red if more toxic; green if less toxic
-    opac_other = min(abs(diff_other / full_opacity_diff), 1.)
-    return ["", f"background-color: rgba({bkgd_user}, {opac_user});", f"background-color: rgba({bkgd_other}, {opac_other});", "", ""]
-
-def display_examples_cluster(preds_df, other_ids, num_examples, sort_ascending, worker_id="A"):
-    user_df = preds_df[preds_df.user_id == worker_id].sort_values(by=["item_id"]).reset_index()
-    others_df = preds_df[preds_df.user_id == other_ids[0]]
-    for i in range(1, len(other_ids)):
-        others_df.append(preds_df[preds_df.user_id == other_ids[i]])
-        others_df.groupby(["item_id"]).mean()
-    others_df = others_df.sort_values(by=["item_id"]).reset_index()
-    
-    df = pd.merge(user_df, others_df, on="item_id", how="left", suffixes=('_user', '_other'))
-    df["Comment"] = df["comment_user"]
-    df["Your predicted rating"] = df["pred_user"]
-    df["Other users' predicted rating"] = df["pred_other"]
-    df["Status-quo system rating"] = df["rating_avg_user"]
-    df["Status-quo system std dev"] = df["rating_stddev_user"]
-    df = df[["Comment", "Your predicted rating", "Other users' predicted rating", "Status-quo system rating", "Status-quo system std dev"]]
-    
-    # Add styling
-    df = df.sort_values(by=['Status-quo system std dev'], ascending=sort_ascending)
-    n_to_sample = np.min([num_examples, len(df)])
-    df = df.sample(n=n_to_sample).reset_index(drop=True)
-    return df.style.apply(style_color_difference, axis=1).render()
-
-def calc_odds_ratio(df, comparison_group, toxic_threshold=1.5, worker_id="A", debug=False, smoothing_factor=1):
-    if comparison_group == "status_quo":
-        other_pred_col = "rating_avg"
-        # Get unique comments, but fetch average labeler rating
-        num_toxic_other = len(df[(df.user_id == "A") & (df[other_pred_col] >= toxic_threshold)]) + smoothing_factor
-        num_nontoxic_other = len(df[(df.user_id == "A") & (df[other_pred_col] < toxic_threshold)]) + smoothing_factor
-    elif comparison_group == "other_users":
-        other_pred_col = "pred"
-        num_toxic_other = len(df[(df.user_id != "A") & (df[other_pred_col] >= toxic_threshold)]) + smoothing_factor
-        num_nontoxic_other = len(df[(df.user_id != "A") & (df[other_pred_col] < toxic_threshold)]) + smoothing_factor
-        
-    num_toxic_user = len(df[(df.user_id == "A") & (df.pred >= toxic_threshold)]) + smoothing_factor
-    num_nontoxic_user = len(df[(df.user_id == "A") & (df.pred < toxic_threshold)]) + smoothing_factor
-    
-    toxic_ratio = num_toxic_user / num_toxic_other
-    nontoxic_ratio = num_nontoxic_user / num_nontoxic_other
-    odds_ratio = toxic_ratio / nontoxic_ratio
-    
-    if debug:
-        print(f"Odds ratio: {odds_ratio}")
-        print(f"num_toxic_user: {num_toxic_user}, num_nontoxic_user: {num_nontoxic_user}")
-        print(f"num_toxic_other: {num_toxic_other}, num_nontoxic_other: {num_nontoxic_other}")
-    
-    contingency_table = [[num_toxic_user, num_nontoxic_user], [num_toxic_other, num_nontoxic_other]]
-    odds_ratio, p_val = stats.fisher_exact(contingency_table, alternative='two-sided')
-    if debug:
-        print(f"Odds ratio: {odds_ratio}, p={p_val}")
-
-    return odds_ratio
-
-# Neighbor search
-def get_match(comment_inds, K=20, threshold=None, debug=False):
-    match_ids = []
-    rows = []
-    for i in comment_inds:
-        if debug:
-            print(f"\nComment: {comments[i]}")
-        query_embedding = model.encode(comments[i], convert_to_tensor=True)
-        hits = util.semantic_search(query_embedding, embeddings, score_function=util.cos_sim, top_k=K)
-        # print(hits[0])
-        for hit in hits[0]:
-            c_id = hit['corpus_id']
-            score = np.round(hit['score'], 3)
-            if threshold is None or score > threshold:
-                match_ids.append(c_id)
-                if debug:
-                    print(f"\t(ID={c_id}, Score={score}): {comments[c_id]}")
-                rows.append([c_id, score, comments[c_id]])
-    
-    df = pd.DataFrame(rows, columns=["id", "score", "comment"])
-    return match_ids
-
-def display_examples_auto_cluster(preds_df, cluster, other_ids, perf_metric, sort_ascending=True, worker_id="A", num_examples=10):
-    # Overall performance
-    topic_df = preds_df
-    topic_df = topic_df[topic_df["topic"] == cluster]
-    user_perf, other_perf = get_overall_perf3(topic_df, perf_metric, other_ids)
-    
-    user_direction = "LOWER" if user_perf < 0 else "HIGHER"
-    other_direction = "LOWER" if other_perf < 0 else "HIGHER"
-    print(f"Your ratings are on average {np.round(abs(user_perf), 3)} {user_direction} than the existing system for this cluster")
-    print(f"Others' ratings (based on {len(other_ids)} users) are on average {np.round(abs(other_perf), 3)} {other_direction} than the existing system for this cluster")
-        
-    # Display example comments
-    df = display_examples_cluster(preds_df, other_ids, num_examples, sort_ascending)
-    return df
-
-    
-# function to get results for a new provided cluster
-def display_examples_manual_cluster(preds_df, cluster_comments, other_ids, perf_metric, sort_ascending=True, worker_id="A"):
-    # Overall performance
-    cluster_df = preds_df[preds_df["comment"].isin(cluster_comments)]
-    user_perf, other_perf = get_overall_perf3(cluster_df, perf_metric, other_ids)
-    
-    user_direction = "LOWER" if user_perf < 0 else "HIGHER"
-    other_direction = "LOWER" if other_perf < 0 else "HIGHER"
-    print(f"Your ratings are on average {np.round(abs(user_perf), 3)} {user_direction} than the existing system for this cluster")
-    print(f"Others' ratings (based on {len(other_ids)} users) are on average {np.round(abs(other_perf), 3)} {other_direction} than the existing system for this cluster")
-        
-    user_df = preds_df[preds_df.user_id == worker_id].sort_values(by=["item_id"]).reset_index()
-    others_df = preds_df[preds_df.user_id == other_ids[0]]
-    for i in range(1, len(other_ids)):
-        others_df.append(preds_df[preds_df.user_id == other_ids[i]])
-        others_df.groupby(["item_id"]).mean()
-    others_df = others_df.sort_values(by=["item_id"]).reset_index()
-    
-    # Get cluster_comments
-    user_df = user_df[user_df["comment"].isin(cluster_comments)]
-    others_df = others_df[others_df["comment"].isin(cluster_comments)]
-    
-    df = pd.merge(user_df, others_df, on="item_id", how="left", suffixes=('_user', '_other'))
-    df["pred_system"] = df["rating_avg_user"]
-    df["pred_system_stddev"] = df["rating_stddev_user"]
-    df = df[["item_id", "comment_user", "pred_user", "pred_other", "pred_system", "pred_system_stddev"]]
-    
-    # Add styling
-    df = df.sort_values(by=['pred_system_stddev'], ascending=sort_ascending)
-    df = df.style.apply(style_color_difference, axis=1).render()
-    return df
-
-########################################
 # GET_LABELING utils
-def create_example_sets(comments_df, n_label_per_bin, score_bins, keyword=None, topic=None):
+def create_example_sets(n_label_per_bin, score_bins, keyword=None, topic=None):
     # Restrict to the keyword, if provided
-    df = comments_df.copy()
+    df = system_preds_df.copy()
     if keyword != None:
         df = df[df["comment"].str.contains(keyword)]    
     
@@ -651,8 +290,8 @@ def create_example_sets(comments_df, n_label_per_bin, score_bins, keyword=None, 
     
     return ex_to_label
 
-def get_grp_model_labels(comments_df, n_label_per_bin, score_bins, grp_ids):
-    df = comments_df.copy()
+def get_grp_model_labels(n_label_per_bin, score_bins, grp_ids):
+    df = system_preds_df.copy()
 
     train_df_grp = train_df[train_df["user_id"].isin(grp_ids)]
     train_df_grp_avg = train_df_grp.groupby(by=["item_id"]).median().reset_index()
@@ -677,105 +316,206 @@ def get_grp_model_labels(comments_df, n_label_per_bin, score_bins, grp_ids):
     return ratings_grp  
 
 ########################################
+# SAVE_REPORT utils
+
+# Convert the SEP field selection from the UI to the SEP enum value
+def get_sep_enum(sep_selection):
+    if sep_selection == "Adversarial Example":
+        return "S0403: Adversarial Example"
+    elif sep_selection == "Accuracy":
+        return "P0204: Accuracy"
+    elif sep_selection == "Bias/Discrimination":
+        return "E0100: Bias/ Discrimination"
+    else:
+        return "P0200: Model issues"
+
+# Format the description for the report including the provided title, error type, and text entry field ("Summary/Suggestions" text box)
+def format_description(indie_label_json):
+    title = indie_label_json["title"]
+    error_type = indie_label_json["error_type"]
+    text_entry = indie_label_json["text_entry"]
+    return f"Title: {title}\nError Type: {error_type}\nSummary/Suggestions: {text_entry}"
+
+# Convert indielabel json to AVID json format.
+# See the AVID format in https://avidml.org/avidtools/reference/report
+#
+# Important mappings:
+#   IndieLabel Attribute        AVID Attribute          Example
+#   text_entry                  description             "I think the Perspective API
+#                                                       is too sensitive. Here are some examples."
+#   topic                       feature                 0_shes_woman_lady_face
+#   persp_score                 model_score             0.94
+#   comment                     ori_input               "She looks beautiful"
+#   user_rating                 personal_model_score    0.92
+#   user_decision               user_decision           "Non-toxic"
+# Note that this is at the individual report level.
+def convert_indie_label_json_to_avid_json(indie_label_json, cur_user, email, sep_selection):
+
+    # Setting up the structure with a dict to enable programmatic additions
+    avid_json_dict = { 
+        "data_type": "AVID",
+        "data_version": None,
+        "metadata": None,
+        "affects": {
+            "developer": [],
+            "deployer": [
+              "Hugging Face"
+            ],
+            # TODO: Make artifacts malleable during modularity work
+            "artifacts": [
+              {
+                "type": "Model",
+                "name": "Perspective API"
+              }
+            ]
+        },
+        "problemtype": {
+            "classof": "Undefined", # I don't think any of the other ClassEnums are applicable. Link: https://avidml.org/avidtools/_modules/avidtools/datamodels/enums#ClassEnum
+            "type": "Detection",
+            "description": {
+              "lang": "eng", # TODO: Make language selectable
+              "value": "This report contains results from an end user audit conducted on Hugging Face."
+            }
+          },
+        "metrics": [ # Note: For the end users use case, I made each comment an example.
+          ],
+        "references": [],
+        "description": {
+            "lang": "eng", # TODO: Make language selectable
+            "value": "" # Leaving empty so the report comments can be contained here.
+          },
+          "impact": {
+            "avid": {
+              "risk_domain": [
+                "Ethics"
+              ],
+              "sep_view": [
+                "E0101: Group fairness"
+              ],
+              "lifecycle_view": [
+                "L05: Evaluation"
+              ],
+              "taxonomy_version": "0.2"
+            }
+          },
+          "credit": "", # Leaving empty so that credit can be assigned
+          "reported_date": "" # Leaving empty so that it can be dynamically filled in
+    }
+
+    avid_json_dict["description"] = format_description(indie_label_json)
+    avid_json_dict["reported_date"] = str(date.today())
+    # Assign credit to email if provided, otherwise default to randomly assigned username
+    if email != "":
+        avid_json_dict["credit"] = email
+    else:
+        avid_json_dict["credit"] = cur_user
+
+    sep_enum = get_sep_enum(sep_selection)
+    avid_json_dict["impact"]["avid"]["sep_view"] = [sep_enum]
+
+    for e in indie_label_json["evidence"]:
+        curr_metric = {}
+        curr_metric["name"] = "Perspective API"
+        curr_metric["detection_method"] = {
+            "type": "Detection",
+            "name": "Individual Example from End User Audit"
+        }
+        res_dict = {}
+        res_dict["feature"] = e["topic"]
+        res_dict["model_score"] = str(e["persp_score"]) # Converted to string to avoid Float type error with DB
+        res_dict["ori_input"] = e["comment"]
+        res_dict["personal_model_score"] = str(e["user_rating"]) # See above
+        res_dict["user_decision"] = e["user_decision"]
+        curr_metric["results"] = res_dict
+        avid_json_dict["metrics"].append(curr_metric)
+
+    new_report = json.dumps(avid_json_dict)
+    return new_report
+
+########################################
 # GET_PERSONALIZED_MODEL utils
-def fetch_existing_data(model_name, last_label_i):
+def fetch_existing_data(user, model_name):
     # Check if we have cached model performance
-    perf_dir = f"./data/perf/{model_name}"
-    label_dir = f"./data/labels/{model_name}"
-    if os.path.isdir(os.path.join(module_dir, perf_dir)):
+    n_perf_files = get_n_perf_files(user, model_name)
+    if n_perf_files > 0:
         # Fetch cached results
-        last_i = len([name for name in os.listdir(os.path.join(module_dir, perf_dir)) if os.path.isfile(os.path.join(module_dir, perf_dir, name))])
-        with open(os.path.join(module_dir, perf_dir, f"{last_i}.pkl"), "rb") as f:
+        perf_file = get_perf_file(user, model_name, n_perf_files - 1)  # Get last performance file
+        with open(perf_file, "rb") as f:
             mae, mse, rmse, avg_diff = pickle.load(f)
     else:
-        # Fetch results from trained model
-        with open(os.path.join(module_dir, f"./data/trained_models/{model_name}.pkl"), "rb") as f:
-            cur_model = pickle.load(f)
-            mae, mse, rmse, avg_diff = users_perf(cur_model)
-        # Cache results
-        os.mkdir(os.path.join(module_dir, perf_dir))
-        with open(os.path.join(module_dir, perf_dir, "1.pkl"), "wb") as f:
-            pickle.dump((mae, mse, rmse, avg_diff), f)
+        raise Exception(f"Model {model_name} does not exist")
     
     # Fetch previous user-provided labels
     ratings_prev = None
-    if last_label_i > 0:
-        with open(os.path.join(module_dir, label_dir, f"{last_i}.pkl"), "rb") as f:
+    n_label_files = get_n_label_files(user, model_name)
+    if n_label_files > 0:
+        label_file = get_label_file(user, model_name, n_label_files - 1) # Get last label file
+        with open(label_file, "rb") as f:
             ratings_prev = pickle.load(f)
     return mae, mse, rmse, avg_diff, ratings_prev
 
-def train_updated_model(model_name, last_label_i, ratings, user, top_n=20, topic=None):
+# Main function called by server's `get_personalized_model` endpoint
+# Trains an updated model with the specified name, user, and ratings
+# Saves ratings, performance metrics, and pre-computed predictions to files
+# - model_name: name of the model to train
+# - ratings: dictionary of comments to ratings
+# - user: user name
+# - top_n: number of comments to train on (used when a set was held out for original user study)
+# - topic: topic to train on (used when tuning for a specific topic)
+def train_updated_model(model_name, ratings, user, top_n=None, topic=None, debug=False):
     # Check if there is previously-labeled data; if so, combine it with this data
-    perf_dir = f"./data/perf/{model_name}"
-    label_dir = f"./data/labels/{model_name}"
-    labeled_df = format_labeled_data(ratings) # Treat ratings as full batch of all ratings
+    labeled_df = format_labeled_data(ratings, worker_id=user) # Treat ratings as full batch of all ratings
     ratings_prev = None
 
     # Filter out rows with "unsure" (-1)
     labeled_df = labeled_df[labeled_df["rating"] != -1]
 
     # Filter to top N for user study
-    if topic is None:
-        # labeled_df = labeled_df.head(top_n)
-        labeled_df = labeled_df.tail(top_n)
+    if (topic is None) and (top_n is not None):
+        labeled_df = labeled_df.head(top_n)
     else:
         # For topic tuning, need to fetch old labels
-        if (last_label_i > 0):
+        n_label_files = get_n_label_files(user, model_name)
+        if n_label_files > 0:
             # Concatenate previous set of labels with this new batch of labels
-            with open(os.path.join(module_dir, label_dir, f"{last_label_i}.pkl"), "rb") as f:
+            label_file = get_label_file(user, model_name, n_label_files - 1) # Get last label file
+            with open(label_file, "rb") as f:
                 ratings_prev = pickle.load(f)
-                labeled_df_prev = format_labeled_data(ratings_prev)
+                labeled_df_prev = format_labeled_data(ratings_prev, worker_id=user)
                 labeled_df_prev = labeled_df_prev[labeled_df_prev["rating"] != -1]
                 ratings.update(ratings_prev) # append old ratings to ratings
                 labeled_df = pd.concat([labeled_df_prev, labeled_df])
-
-    print("len ratings for training:", len(labeled_df))
-
-    cur_model, perf, _, _ = train_user_model(ratings_df=labeled_df)
-    
-    user_perf_metrics[model_name] = users_perf(cur_model)
-
-    mae, mse, rmse, avg_diff = user_perf_metrics[model_name]
-
-    cur_preds_df = get_preds_df(cur_model, ["A"], sys_eval_df=ratings_df_full, topic=topic, model_name=model_name)  # Just get results for user
-
+    if debug:
+        print("len ratings for training:", len(labeled_df))
     # Save this batch of labels
-    with open(os.path.join(module_dir, label_dir, f"{last_label_i + 1}.pkl"), "wb") as f:
+    label_file = get_label_file(user, model_name)
+    with open(label_file, "wb") as f:
         pickle.dump(ratings, f)
 
-    # Save model results
-    with open(os.path.join(module_dir, f"./data/preds_dfs/{model_name}.pkl"), "wb") as f:
+    # Train model
+    cur_model, _, _, _ = train_user_model(ratings_df=labeled_df)
+    
+    # Compute performance metrics
+    mae, mse, rmse, avg_diff = users_perf(cur_model, worker_id=user)
+    # Save performance metrics
+    perf_file = get_perf_file(user, model_name)
+    with open(perf_file, "wb") as f:
+        pickle.dump((mae, mse, rmse, avg_diff), f)
+
+    # Pre-compute predictions for full dataset
+    cur_preds_df = get_preds_df(cur_model, [user], sys_eval_df=ratings_df_full)
+    # Save pre-computed predictions
+    preds_file = get_preds_file(user, model_name)
+    with open(preds_file, "wb") as f:
         pickle.dump(cur_preds_df, f)
 
-    if model_name not in all_model_names:
-        all_model_names.append(model_name)
-    with open(os.path.join(module_dir, "./data/all_model_names.pkl"), "wb") as f:
-        pickle.dump(all_model_names, f)
-    
-    # Handle user
-    if user not in users_to_models:
-        users_to_models[user] = []  # New user
-    if model_name not in users_to_models[user]:
-        users_to_models[user].append(model_name)  # New model
-        with open(f"./data/users_to_models.pkl", "wb") as f:
-            pickle.dump(users_to_models, f)
-
-    with open(os.path.join(module_dir, "./data/user_perf_metrics.pkl"), "wb") as f:
-        pickle.dump(user_perf_metrics, f)
-    with open(os.path.join(module_dir, f"./data/trained_models/{model_name}.pkl"), "wb") as f:
-        pickle.dump(cur_model, f)
-    
-    # Cache performance results
-    if not os.path.isdir(os.path.join(module_dir, perf_dir)):
-        os.mkdir(os.path.join(module_dir, perf_dir))
-    last_perf_i = len([name for name in os.listdir(os.path.join(module_dir, perf_dir)) if os.path.isfile(os.path.join(module_dir, perf_dir, name))])
-    with open(os.path.join(module_dir, perf_dir, f"{last_perf_i + 1}.pkl"), "wb") as f:
-        pickle.dump((mae, mse, rmse, avg_diff), f)
+    # Replace cached summary plot if it exists
+    show_overall_perf(cur_model=model_name, error_type="Both", cur_user=user, use_cache=False)
 
     ratings_prev = ratings
     return mae, mse, rmse, avg_diff, ratings_prev
 
-def format_labeled_data(ratings, worker_id="A", debug=False):    
+def format_labeled_data(ratings, worker_id):    
     all_rows = []
     for comment, rating in ratings.items():
         comment_id = comments_to_ids[comment]
@@ -785,7 +525,7 @@ def format_labeled_data(ratings, worker_id="A", debug=False):
     df = pd.DataFrame(all_rows, columns=["user_id", "item_id", "rating"])
     return df
 
-def users_perf(model, sys_eval_df=sys_eval_df, avg_ratings_df=comments_grouped_full_topic_cat, worker_id="A"):
+def users_perf(model, worker_id, sys_eval_df=sys_eval_df):
     # Load the full empty dataset
     sys_eval_comment_ids = sys_eval_df.item_id.unique().tolist()
     empty_ratings_rows = [[worker_id, c_id, 0] for c_id in sys_eval_comment_ids]
@@ -801,17 +541,17 @@ def users_perf(model, sys_eval_df=sys_eval_df, avg_ratings_df=comments_grouped_f
     user_item_preds = get_predictions_by_user_and_item(predictions)
     df["pred"] = df.apply(lambda row: user_item_preds[(row.user_id, row.item_id)] if (row.user_id, row.item_id) in user_item_preds else np.nan, axis=1)
 
-    df = df.merge(avg_ratings_df, on="item_id", how="left", suffixes=('_', '_avg'))
+    df = df.merge(system_preds_df, on="item_id", how="left", suffixes=('', '_sys'))
     df.dropna(subset = ["pred"], inplace=True)
-    df["rating_"] = df.rating_.astype("int32")
+    df["rating"] = df.rating.astype("int32")
 
-    perf_metrics = get_overall_perf(df, "A") # mae, mse, rmse, avg_diff  
+    perf_metrics = get_overall_perf(df, worker_id) # mae, mse, rmse, avg_diff  
     return perf_metrics
 
 def get_overall_perf(preds_df, user_id):    
     # Prepare dataset to calculate performance
-    y_pred = preds_df[preds_df["user_id"] == user_id].rating_avg.to_numpy() # Assume system is just average of true labels
-    y_true = preds_df[preds_df["user_id"] == user_id].pred.to_numpy()
+    y_pred = preds_df[preds_df["user_id"] == user_id].rating_sys.to_numpy() # system's prediction
+    y_true = preds_df[preds_df["user_id"] == user_id].pred.to_numpy() # user's (predicted) ground truth
     
     # Get performance for user's model
     mae = mean_absolute_error(y_true, y_pred)
@@ -827,7 +567,11 @@ def get_predictions_by_user_and_item(predictions):
         user_item_preds[(uid, iid)] = est
     return user_item_preds
 
-def get_preds_df(model, user_ids, orig_df=ratings_df_full, avg_ratings_df=comments_grouped_full_topic_cat, sys_eval_df=sys_eval_df, bins=BINS, topic=None, model_name=None):
+# Pre-computes predictions for the provided model and specified users on the system-eval dataset
+# - model: trained model
+# - user_ids: list of user IDs to compute predictions for
+# - sys_eval_df: dataframe of system eval labels (pre-computed)
+def get_preds_df(model, user_ids, sys_eval_df=sys_eval_df, bins=BINS, debug=False):
     # Prep dataframe for all predictions we'd like to request
     start = time.time()
     sys_eval_comment_ids = sys_eval_df.item_id.unique().tolist()
@@ -836,7 +580,8 @@ def get_preds_df(model, user_ids, orig_df=ratings_df_full, avg_ratings_df=commen
     for user_id in user_ids:
         empty_ratings_rows.extend([[user_id, c_id, 0] for c_id in sys_eval_comment_ids])
     empty_ratings_df = pd.DataFrame(empty_ratings_rows, columns=["user_id", "item_id", "rating"])
-    print("setup", time.time() - start)
+    if debug:
+        print("setup", time.time() - start)
     
     # Evaluate model to get predictions
     start = time.time() 
@@ -844,16 +589,17 @@ def get_preds_df(model, user_ids, orig_df=ratings_df_full, avg_ratings_df=commen
     eval_set_data = Dataset.load_from_df(empty_ratings_df, reader)
     _, testset = train_test_split(eval_set_data, test_size=1.)
     predictions = model.test(testset)
-    print("train_test_split", time.time() - start)
+    if debug:
+        print("train_test_split", time.time() - start)
     
     # Update dataframe with predictions
     start = time.time()
     df = empty_ratings_df.copy() # user_id, item_id, rating
     user_item_preds = get_predictions_by_user_and_item(predictions)
     df["pred"] = df.apply(lambda row: user_item_preds[(row.user_id, row.item_id)] if (row.user_id, row.item_id) in user_item_preds else np.nan, axis=1)
-    df = df.merge(avg_ratings_df, on="item_id", how="left", suffixes=('_', '_avg'))
+    df = df.merge(system_preds_df, on="item_id", how="left", suffixes=('', '_sys'))
     df.dropna(subset = ["pred"], inplace=True)
-    df["rating_"] = df.rating_.astype("int32")
+    df["rating"] = df.rating.astype("int32")
     
     # Get binned predictions (based on user prediction)
     df["prediction_bin"], out_bins = pd.cut(df["pred"], bins, labels=False, retbins=True)
@@ -861,9 +607,14 @@ def get_preds_df(model, user_ids, orig_df=ratings_df_full, avg_ratings_df=commen
 
     return df
 
+# Given the full set of ratings, trains the specified model type and evaluates on the model eval set
+# - ratings_df: dataframe of all ratings
+# - train_df: dataframe of training labels
+# - model_eval_df: dataframe of model eval labels (validation set)
+# - train_frac: fraction of ratings to use for training
 def train_user_model(ratings_df, train_df=train_df, model_eval_df=model_eval_df, train_frac=0.75, model_type="SVD", sim_type=None, user_based=True):
     # Sample from shuffled labeled dataframe and add batch to train set; specified set size to model_eval set
-    labeled = ratings_df.sample(frac=1)
+    labeled = ratings_df.sample(frac=1)  # Shuffle the data
     batch_size = math.floor(len(labeled) * train_frac)
     labeled_train = labeled[:batch_size]
     labeled_model_eval = labeled[batch_size:]
@@ -876,7 +627,11 @@ def train_user_model(ratings_df, train_df=train_df, model_eval_df=model_eval_df,
     
     return model, perf, labeled_train, labeled_model_eval
 
-def train_model(train_df, model_eval_df, model_type="SVD", sim_type=None, user_based=True):
+# Given a set of labels split into training and validation (model_eval), trains the specified model type on the training labels and evaluates on the model_eval labels
+# - train_df: dataframe of training labels
+# - model_eval_df: dataframe of model eval labels (validation set)
+# - model_type: type of model to train
+def train_model(train_df, model_eval_df, model_type="SVD", sim_type=None, user_based=True, debug=False):
     # Train model
     reader = Reader(rating_scale=(0, 4))
     train_data = Dataset.load_from_df(train_df, reader)
@@ -905,58 +660,18 @@ def train_model(train_df, model_eval_df, model_type="SVD", sim_type=None, user_b
     mae = accuracy.mae(predictions)
     mse = accuracy.mse(predictions)
     
-    print(f"MAE: {mae}, MSE: {mse}, RMSE: {rmse}, FCP: {fcp}")
+    if debug:
+        print(f"MAE: {mae}, MSE: {mse}, RMSE: {rmse}, FCP: {fcp}")
     perf = [mae, mse, rmse, fcp]
     
     return algo, perf
 
-def plot_train_perf_results2(model_name):
-    # Open labels
-    label_dir = f"./data/labels/{model_name}"
-    n_label_files = len([name for name in os.listdir(os.path.join(module_dir, label_dir)) if os.path.isfile(os.path.join(module_dir, label_dir, name))])
-    
+def plot_train_perf_results(user, model_name, mae):
+    n_perf_files = get_n_perf_files(user, model_name)
     all_rows = []
-    with open(os.path.join(module_dir, label_dir, f"{n_label_files}.pkl"), "rb") as f:
-        ratings = pickle.load(f)
-
-        labeled_df = format_labeled_data(ratings)
-        labeled_df = labeled_df[labeled_df["rating"] != -1]
-
-        # Iterate through batches of 5 labels
-        n_batches = int(np.ceil(len(labeled_df) / 5.))
-        for i in range(n_batches):
-            start = time.time()
-            n_to_sample = np.min([5 * (i + 1), len(labeled_df)])
-            cur_model, _, _, _ = train_user_model(ratings_df=labeled_df.head(n_to_sample))
-            mae, mse, rmse, avg_diff = users_perf(cur_model)
-            all_rows.append([n_to_sample, mae, "MAE"])
-            print(f"iter {i}: {time.time() - start}")
-        
-        print("all_rows", all_rows)
-        
-        df = pd.DataFrame(all_rows, columns=["n_to_sample", "perf", "metric"])
-        chart = alt.Chart(df).mark_line(point=True).encode(
-            x=alt.X("n_to_sample:Q", title="Number of Comments Labeled"),
-            y="perf",
-            color="metric",
-            tooltip=[
-                alt.Tooltip('n_to_sample:Q', title="Number of Comments Labeled"),
-                alt.Tooltip('metric:N', title="Metric"),
-                alt.Tooltip('perf:Q', title="Metric Value", format=".3f"),
-            ],
-        ).properties(
-            title=f"Performance over number of examples: {model_name}",
-            width=500,
-        )
-        return chart
-
-def plot_train_perf_results(model_name, mae):
-    perf_dir = f"./data/perf/{model_name}"
-    n_perf_files = len([name for name in os.listdir(os.path.join(module_dir, perf_dir)) if os.path.isfile(os.path.join(module_dir, perf_dir, name))])
-
-    all_rows = []
-    for i in range(1, n_perf_files + 1):
-        with open(os.path.join(module_dir, perf_dir, f"{i}.pkl"), "rb") as f:
+    for i in range(n_perf_files):
+        perf_file = get_perf_file(user, model_name, i)
+        with open(perf_file, "rb") as f:
             mae, mse, rmse, avg_diff = pickle.load(f)
             all_rows.append([i, mae, "Your MAE"])
         
@@ -975,24 +690,24 @@ def plot_train_perf_results(model_name, mae):
         width=500,
     )
 
-    PCT_50 = 0.591
-    PCT_75 = 0.662
-    PCT_90 = 0.869
+    # Manually set for now
+    mae_good = 1.0
+    mae_okay = 1.2
 
     plot_dim_width = 500
     domain_min = 0.0
-    domain_max = 1.0
+    domain_max = 2.0
     bkgd = alt.Chart(pd.DataFrame({
-        "start": [PCT_90, PCT_75, domain_min],
-        "stop": [domain_max, PCT_90, PCT_75],
-        "bkgd": ["Needs improvement (< top 90%)", "Okay (top 90%)", "Good (top 75%)"],
+        "start": [mae_okay, mae_good, domain_min],
+        "stop": [domain_max, mae_okay, mae_good],
+        "bkgd": ["Needs improvement", "Okay", "Good"],
     })).mark_rect(opacity=0.2).encode(
-        y=alt.Y("start:Q", scale=alt.Scale(domain=[0, domain_max])),
-        y2=alt.Y2("stop:Q"),
+        y=alt.Y("start:Q", scale=alt.Scale(domain=[0, domain_max]), title=""),
+        y2=alt.Y2("stop:Q", title="Performance (MAE)"),
         x=alt.value(0),
         x2=alt.value(plot_dim_width),
         color=alt.Color("bkgd:O", scale=alt.Scale(
-            domain=["Needs improvement (< top 90%)", "Okay (top 90%)", "Good (top 75%)"], 
+            domain=["Needs improvement", "Okay", "Good"], 
             range=["red", "yellow", "green"]),
             title="How good is your MAE?"
         )
@@ -1000,12 +715,12 @@ def plot_train_perf_results(model_name, mae):
 
     plot = (bkgd + chart).properties(width=plot_dim_width).resolve_scale(color='independent')
     mae_status = None
-    if mae < PCT_75:
-        mae_status = "Your MAE is in the <b>Good</b> range, which means that it's in the top 75% of scores compared to other users. Your model looks good to go."
-    elif mae < PCT_90:
-        mae_status = "Your MAE is in the <b>Okay</b> range, which means that it's in the top 90% of scores compared to other users. Your model can be used, but you can provide additional labels to improve it."
+    if mae < mae_good:
+        mae_status = "Your MAE is in the <b>Good</b> range. Your model looks ready to go."
+    elif mae < mae_okay:
+        mae_status = "Your MAE is in the <b>Okay</b> range. Your model can be used, but you can provide additional labels to improve it."
     else:
-        mae_status = "Your MAE is in the <b>Needs improvement</b> range, which means that it's in below the top 95% of scores compared to other users. Your model may need additional labels to improve."
+        mae_status = "Your MAE is in the <b>Needs improvement</b> range. Your model may need additional labels to improve."
     return plot, mae_status
 
 ########################################
@@ -1104,14 +819,14 @@ def get_decision(rating, threshold):
 
 def get_category(row, threshold=0.3):
     k_to_category = {
-        "is_profane_frac_": "Profanity", 
-        "is_threat_frac_": "Threat", 
-        "is_identity_attack_frac_": "Identity Attack", 
-        "is_insult_frac_": "Insult", 
-        "is_sexual_harassment_frac_": "Sexual Harassment",
+        "is_profane_frac": "Profanity", 
+        "is_threat_frac": "Threat", 
+        "is_identity_attack_frac": "Identity Attack", 
+        "is_insult_frac": "Insult", 
+        "is_sexual_harassment_frac": "Sexual Harassment",
     }
     categories = []
-    for k in ["is_profane_frac_", "is_threat_frac_", "is_identity_attack_frac_", "is_insult_frac_", "is_sexual_harassment_frac_"]:
+    for k in ["is_profane_frac", "is_threat_frac", "is_identity_attack_frac", "is_insult_frac", "is_sexual_harassment_frac"]:
         if row[k] > threshold:
             categories.append(k_to_category[k])
     
@@ -1124,19 +839,20 @@ def get_comment_url(row):
     return f"#{row['item_id']}/#comment"
 
 def get_topic_url(row):
-    return f"#{row['topic_']}/#topic"
+    return f"#{row['topic']}/#topic"
 
-def plot_overall_vis(preds_df, error_type, cur_user, cur_model, n_topics=None, bins=VIS_BINS, threshold=TOXIC_THRESHOLD, bin_step=0.05):
+# Plots overall results histogram (each block is a topic)
+def plot_overall_vis(preds_df, error_type, cur_user, cur_model, n_topics=None, bins=VIS_BINS, threshold=TOXIC_THRESHOLD, sys_col="rating_sys"):
     df = preds_df.copy().reset_index()
     
     if n_topics is not None:
-        df = df[df["topic_id_"] < n_topics]
+        df = df[df["topic_id"] < n_topics]
     
     df["vis_pred_bin"], out_bins = pd.cut(df["pred"], bins, labels=VIS_BINS_LABELS, retbins=True)
-    df = df[df["user_id"] == "A"].sort_values(by=["item_id"]).reset_index()
-    df["system_label"] = [("toxic" if r > threshold else "non-toxic") for r in df["rating"].tolist()]
-    df["threshold"] = [threshold for r in df["rating"].tolist()]
-    df["key"] = [get_key(sys, user, threshold) for sys, user in zip(df["rating"].tolist(), df["pred"].tolist())]
+    df = df[df["user_id"] == cur_user].sort_values(by=["item_id"]).reset_index()
+    df["system_label"] = [("toxic" if r > threshold else "non-toxic") for r in df[sys_col].tolist()]
+    df["threshold"] = [threshold for r in df[sys_col].tolist()]
+    df["key"] = [get_key(sys, user, threshold) for sys, user in zip(df[sys_col].tolist(), df["pred"].tolist())]
     df["url"] = df.apply(lambda row: get_topic_url(row), axis=1)
     
     # Plot sizing
@@ -1154,12 +870,12 @@ def plot_overall_vis(preds_df, error_type, cur_user, cur_model, n_topics=None, b
     # Main chart
     chart = alt.Chart(df).mark_square(opacity=0.8, size=mark_size, stroke="grey", strokeWidth=0.5).transform_window(
         groupby=['vis_pred_bin'],
-        sort=[{'field': 'rating'}],
+        sort=[{'field': sys_col}],
         id='row_number()',
         ignorePeers=True,
     ).encode(
         x=alt.X('vis_pred_bin:Q', title="Our prediction of your rating", scale=alt.Scale(domain=(domain_min, domain_max))),
-        y=alt.Y('id:O', title="Comments (ordered by System toxicity rating)", axis=alt.Axis(values=list(range(0, max_items, 5))), sort='descending'),
+        y=alt.Y('id:O', title="Topics (ordered by System toxicity rating)", axis=alt.Axis(values=list(range(0, max_items, 5))), sort='descending'),
         color = alt.Color("key:O", scale=alt.Scale(
             domain=["System agrees: Non-toxic", "System agrees: Toxic", "System differs: Error > 1.5", "System differs: Error > 1.0", "System differs: Error > 0.5", "System differs: Error <=0.5"], 
             range=["white", "#cbcbcb", "red", "#ff7a5c", "#ffa894", "#ffd1c7"]),
@@ -1167,9 +883,9 @@ def plot_overall_vis(preds_df, error_type, cur_user, cur_model, n_topics=None, b
         ),
         href="url:N",
         tooltip = [
-            alt.Tooltip("topic_:N", title="Topic"),
+            alt.Tooltip("topic:N", title="Topic"),
             alt.Tooltip("system_label:N", title="System label"),
-            alt.Tooltip("rating:Q", title="System rating", format=".2f"),
+            alt.Tooltip(f"{sys_col}:Q", title="System rating", format=".2f"),
             alt.Tooltip("pred:Q", title="Your rating", format=".2f")
         ]
     )
@@ -1233,31 +949,17 @@ def plot_overall_vis(preds_df, error_type, cur_user, cur_model, n_topics=None, b
     )
     
     plot = (bkgd + annotation + chart + rule).properties(height=(plot_dim_height), width=plot_dim_width).resolve_scale(color='independent').to_json()
-
-    # Save to file
-    chart_dir = "./data/charts"
-    chart_file = os.path.join(chart_dir, f"{cur_user}_{cur_model}.pkl")
-    with open(chart_file, "w") as f:
-        json.dump(plot, f)
-
     return plot
 
-def get_cluster_overview_plot(preds_df, error_type, threshold=TOXIC_THRESHOLD, use_model=True):
-    preds_df_mod = preds_df.merge(comments_grouped_full_topic_cat, on="item_id", how="left", suffixes=('_', '_avg'))
-
-    if use_model:
-        return plot_overall_vis_cluster(preds_df_mod, error_type=error_type, n_comments=500, threshold=threshold)
-    else:
-        return plot_overall_vis_cluster2(preds_df_mod, error_type=error_type, n_comments=500, threshold=threshold)
-
-def plot_overall_vis_cluster2(preds_df, error_type, n_comments=None, bins=VIS_BINS, threshold=TOXIC_THRESHOLD, bin_step=0.05):
+# Plots cluster results histogram (each block is a comment), but *without* a model 
+# as a point of reference (in contrast to plot_overall_vis_cluster)
+def plot_overall_vis_cluster_no_model(cur_user, preds_df, n_comments=None, bins=VIS_BINS, threshold=TOXIC_THRESHOLD, sys_col="rating_sys"):
     df = preds_df.copy().reset_index()
     
-    df["vis_pred_bin"], out_bins = pd.cut(df["rating"], bins, labels=VIS_BINS_LABELS, retbins=True)
-    df = df[df["user_id"] == "A"].sort_values(by=["rating"]).reset_index()
-    df["system_label"] = [("toxic" if r > threshold else "non-toxic") for r in df["rating"].tolist()]
-    df["key"] = [get_key_no_model(sys, threshold) for sys in df["rating"].tolist()]
-    print("len(df)", len(df))  # always 0 for some reason (from keyword search)
+    df["vis_pred_bin"], out_bins = pd.cut(df[sys_col], bins, labels=VIS_BINS_LABELS, retbins=True)
+    df = df[df["user_id"] == cur_user].sort_values(by=[sys_col]).reset_index()
+    df["system_label"] = [("toxic" if r > threshold else "non-toxic") for r in df[sys_col].tolist()]
+    df["key"] = [get_key_no_model(sys, threshold) for sys in df[sys_col].tolist()]
     df["category"] = df.apply(lambda row: get_category(row), axis=1)
     df["url"] = df.apply(lambda row: get_comment_url(row), axis=1)
     
@@ -1279,7 +981,7 @@ def plot_overall_vis_cluster2(preds_df, error_type, n_comments=None, bins=VIS_BI
     # Main chart
     chart = alt.Chart(df).mark_square(opacity=0.8, size=mark_size, stroke="grey", strokeWidth=0.25).transform_window(
         groupby=['vis_pred_bin'],
-        sort=[{'field': 'rating'}],
+        sort=[{'field': sys_col}],
         id='row_number()',
         ignorePeers=True
     ).encode(
@@ -1293,8 +995,8 @@ def plot_overall_vis_cluster2(preds_df, error_type, n_comments=None, bins=VIS_BI
         ),
         href="url:N",
         tooltip = [
-            alt.Tooltip("comment_:N", title="comment"),
-            alt.Tooltip("rating:Q", title="System rating", format=".2f"),
+            alt.Tooltip("comment:N", title="comment"),
+            alt.Tooltip(f"{sys_col}:Q", title="System rating", format=".2f"),
         ]
     )
     
@@ -1345,24 +1047,22 @@ def plot_overall_vis_cluster2(preds_df, error_type, n_comments=None, bins=VIS_BI
     final_plot = (bkgd + annotation + chart + rule).properties(height=(plot_dim_height), width=plot_dim_width).resolve_scale(color='independent').to_json()
 
     return final_plot, df
-            
-def plot_overall_vis_cluster(preds_df, error_type, n_comments=None, bins=VIS_BINS, threshold=TOXIC_THRESHOLD, bin_step=0.05):
-    df = preds_df.copy().reset_index(drop=True)
-    # df = df[df["topic_"] == topic]
+
+# Plots cluster results histogram (each block is a comment) *with* a model as a point of reference
+def plot_overall_vis_cluster(cur_user, preds_df, error_type, n_comments=None, bins=VIS_BINS, threshold=TOXIC_THRESHOLD, sys_col="rating_sys"):
+    df = preds_df.copy().reset_index()
     
     df["vis_pred_bin"], out_bins = pd.cut(df["pred"], bins, labels=VIS_BINS_LABELS, retbins=True)
-    df = df[df["user_id"] == "A"].sort_values(by=["rating"]).reset_index(drop=True)
-    df["system_label"] = [("toxic" if r > threshold else "non-toxic") for r in df["rating"].tolist()]
-    df["key"] = [get_key(sys, user, threshold) for sys, user in zip(df["rating"].tolist(), df["pred"].tolist())]
-    print("len(df)", len(df))  # always 0 for some reason (from keyword search)
-    # print("columns", df.columns)
+    df = df[df["user_id"] == cur_user].sort_values(by=[sys_col]).reset_index(drop=True)
+    df["system_label"] = [("toxic" if r > threshold else "non-toxic") for r in df[sys_col].tolist()]
+    df["key"] = [get_key(sys, user, threshold) for sys, user in zip(df[sys_col].tolist(), df["pred"].tolist())]
     df["category"] = df.apply(lambda row: get_category(row), axis=1)
     df["url"] = df.apply(lambda row: get_comment_url(row), axis=1)
     
     if n_comments is not None:
         n_to_sample = np.min([n_comments, len(df)])
         df = df.sample(n=n_to_sample)
-    
+        
     # Plot sizing
     domain_min = 0
     domain_max = 4
@@ -1377,7 +1077,7 @@ def plot_overall_vis_cluster(preds_df, error_type, n_comments=None, bins=VIS_BIN
     # Main chart
     chart = alt.Chart(df).mark_square(opacity=0.8, size=mark_size, stroke="grey", strokeWidth=0.25).transform_window(
         groupby=['vis_pred_bin'],
-        sort=[{'field': 'rating'}],
+        sort=[{'field': sys_col}],
         id='row_number()',
         ignorePeers=True
     ).encode(
@@ -1390,8 +1090,8 @@ def plot_overall_vis_cluster(preds_df, error_type, n_comments=None, bins=VIS_BIN
         ),
         href="url:N",
         tooltip = [
-            alt.Tooltip("comment_:N", title="comment"),
-            alt.Tooltip("rating:Q", title="System rating", format=".2f"),
+            alt.Tooltip("comment:N", title="comment"),
+            alt.Tooltip(f"{sys_col}:Q", title="System rating", format=".2f"),
             alt.Tooltip("pred:Q", title="Your rating", format=".2f"),
             alt.Tooltip("category:N", title="Potential toxicity categories")
         ]
@@ -1457,30 +1157,27 @@ def plot_overall_vis_cluster(preds_df, error_type, n_comments=None, bins=VIS_BIN
 
     return final_plot, df
 
-def get_cluster_comments(df, error_type, threshold=TOXIC_THRESHOLD, worker_id="A", num_examples=50, use_model=True):    
+def get_cluster_comments(df, error_type, threshold=TOXIC_THRESHOLD, sys_col="rating_sys", use_model=True, debug=False):    
     df["user_color"] = [get_user_color(user, threshold) for user in df["pred"].tolist()]  # get cell colors
-    df["system_color"] = [get_user_color(sys, threshold) for sys in df["rating"].tolist()]  # get cell colors
-    df["error_color"] = [get_system_color(sys, user, threshold) for sys, user in zip(df["rating"].tolist(), df["pred"].tolist())]  # get cell colors
-    df["error_type"] = [get_error_type(sys, user, threshold) for sys, user in zip(df["rating"].tolist(), df["pred"].tolist())]  # get error type in words
-    df["error_amt"] = [abs(sys - threshold) for sys in df["rating"].tolist()]  # get raw error
+    df["system_color"] = [get_user_color(sys, threshold) for sys in df[sys_col].tolist()]  # get cell colors
+    df["error_color"] = [get_system_color(sys, user, threshold) for sys, user in zip(df[sys_col].tolist(), df["pred"].tolist())]  # get cell colors
+    df["error_type"] = [get_error_type(sys, user, threshold) for sys, user in zip(df[sys_col].tolist(), df["pred"].tolist())]  # get error type in words
+    df["error_amt"] = [abs(sys - threshold) for sys in df[sys_col].tolist()]  # get raw error
     df["judgment"] = ["" for _ in range(len(df))]  # template for "agree" or "disagree" buttons
 
     if use_model:
         df = df.sort_values(by=["error_amt"], ascending=False) # surface largest errors first
     else:
-        print("get_cluster_comments; not using model")
-        df = df.sort_values(by=["rating"], ascending=True)
+        if debug:
+            print("get_cluster_comments; not using model")
+        df = df.sort_values(by=[sys_col], ascending=True)
 
     df["id"] = df["item_id"]
-    # df["comment"] already exists
-    df["comment"] = df["comment_"]
     df["toxicity_category"] = df["category"]
     df["user_rating"] = df["pred"]
     df["user_decision"] = [get_decision(rating, threshold) for rating in df["pred"].tolist()]
-    df["system_rating"] = df["rating"]
-    df["system_decision"] = [get_decision(rating, threshold) for rating in df["rating"].tolist()]
-    df["error_type"] = df["error_type"]
-    df = df.head(num_examples)
+    df["system_rating"] = df[sys_col]
+    df["system_decision"] = [get_decision(rating, threshold) for rating in df[sys_col].tolist()]
     df = df.round(decimals=2)
 
     # Filter to specified error type
@@ -1493,7 +1190,7 @@ def get_cluster_comments(df, error_type, threshold=TOXIC_THRESHOLD, worker_id="A
     elif error_type == "Both":
         df = df[(df["error_type"] == "System may be under-sensitive") | (df["error_type"] == "System may be over-sensitive")]
 
-    return df.to_json(orient="records")
+    return df
 
 # PERSONALIZED CLUSTERS utils
 def get_disagreement_comments(preds_df, mode, n=10_000, threshold=TOXIC_THRESHOLD):
@@ -1512,58 +1209,10 @@ def get_disagreement_comments(preds_df, mode, n=10_000, threshold=TOXIC_THRESHOL
     df = df.sort_values(by=["diff"], ascending=asc)
     df = df.head(n)
     
-    return df["comment_"].tolist(), df
+    return df["comment"].tolist(), df
 
-def get_personal_clusters(model, n=3):
-    personal_cluster_file = f"./data/personal_cluster_dfs/{model}.pkl"
-    if (os.path.isfile(personal_cluster_file)):
-        with open(personal_cluster_file, "rb") as f:
-            cluster_df = pickle.load(f)
-            cluster_df = cluster_df.sort_values(by=["topic_id"])
-            topics_under = cluster_df[cluster_df["error_type"] == "System may be under-sensitive"]["topic"].unique().tolist()
-            topics_under = topics_under[1:(n + 1)]
-            topics_over = cluster_df[cluster_df["error_type"] == "System may be over-sensitive"]["topic"].unique().tolist()
-            topics_over = topics_over[1:(n + 1)]
-            return topics_under, topics_over
-    else:
-        topics_under_top = []
-        topics_over_top = []
-        preds_df_file = f"./data/preds_dfs/{model}.pkl"
-        if (os.path.isfile(preds_df_file)):
-            with open(preds_df_file, "rb") as f:
-                preds_df = pickle.load(f)
-                preds_df_mod = preds_df.merge(comments_grouped_full_topic_cat, on="item_id", how="left", suffixes=('_', '_avg')).reset_index()
-                preds_df_mod = preds_df_mod[preds_df_mod["user_id"] == "A"]
-
-                comments_under, comments_under_df = get_disagreement_comments(preds_df_mod, mode="under-sensitive", n=1000)
-                if len(comments_under) > 0:
-                    topics_under = BERTopic(embedding_model="paraphrase-MiniLM-L6-v2").fit(comments_under)
-                    topics_under_top = topics_under.get_topic_info().head(n)["Name"].tolist()
-                    print("topics_under", topics_under_top)
-                    # Get topics per comment
-                    topics_assigned, _ = topics_under.transform(comments_under)
-                    comments_under_df["topic_id"] = topics_assigned
-                    cur_topic_ids = topics_under.get_topic_info().Topic
-                    topic_short_names = topics_under.get_topic_info().Name
-                    topic_ids_to_names = {cur_topic_ids[i]: topic_short_names[i] for i in range(len(cur_topic_ids))}
-                    comments_under_df["topic"] = [topic_ids_to_names[topic_id] for topic_id in comments_under_df["topic_id"].tolist()]
-
-                comments_over, comments_over_df = get_disagreement_comments(preds_df_mod, mode="over-sensitive", n=1000)
-                if len(comments_over) > 0:
-                    topics_over = BERTopic(embedding_model="paraphrase-MiniLM-L6-v2").fit(comments_over)
-                    topics_over_top = topics_over.get_topic_info().head(n)["Name"].tolist()
-                    print("topics_over", topics_over_top)
-                    # Get topics per comment
-                    topics_assigned, _ = topics_over.transform(comments_over)
-                    comments_over_df["topic_id"] = topics_assigned
-                    cur_topic_ids = topics_over.get_topic_info().Topic
-                    topic_short_names = topics_over.get_topic_info().Name
-                    topic_ids_to_names = {cur_topic_ids[i]: topic_short_names[i] for i in range(len(cur_topic_ids))}
-                    comments_over_df["topic"] = [topic_ids_to_names[topic_id] for topic_id in comments_over_df["topic_id"].tolist()]
-
-                cluster_df = pd.concat([comments_under_df, comments_over_df])
-                with open(f"./data/personal_cluster_dfs/{model}.pkl", "wb") as f:
-                    pickle.dump(cluster_df, f)
-
-                return topics_under_top, topics_over_top
-    return [], []
+def get_explore_df(n_examples, threshold):
+    df = system_preds_df.sample(n=n_examples)
+    df["system_decision"] = [get_decision(rating, threshold) for rating in df["rating"].tolist()]
+    df["system_color"] = [get_user_color(sys, threshold) for sys in df["rating"].tolist()]  # get cell colors
+    return df

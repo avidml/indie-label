@@ -17,10 +17,15 @@ import math
 import altair as alt
 import matplotlib.pyplot as plt
 import time
+import friendlywords as fw
 
 import audit_utils as utils
 
+import requests
+
+
 app = Flask(__name__)
+DEBUG = False  # Debug flag for development; set to False for production
 
 # Path for our main Svelte page
 @app.route("/")
@@ -35,15 +40,19 @@ def home(path):
 
 ########################################
 # ROUTE: /AUDIT_SETTINGS
-comments_grouped_full_topic_cat = pd.read_pickle("data/comments_grouped_full_topic_cat2_persp.pkl")
 
 @app.route("/audit_settings")
-def audit_settings():
+def audit_settings(debug=DEBUG):
     # Fetch page content
     user = request.args.get("user")
     scaffold_method = request.args.get("scaffold_method")
 
-    user_models = utils.get_all_model_names(user)
+    # Assign user ID if none is provided (default case)
+    if user == "null":
+        # Generate random two-word user ID
+        user = fw.generate(2, separator="_")
+
+    user_models = utils.get_user_model_names(user)
     grp_models = [m for m in user_models if m.startswith(f"model_{user}_group_")]
 
     clusters = utils.get_unique_topics()
@@ -66,19 +75,6 @@ def audit_settings():
             "options": [{"value": i, "text": cluster} for i, cluster in enumerate(clusters)],
         },]
 
-    if scaffold_method == "personal_cluster":
-        cluster_model = user_models[0]
-        personal_cluster_file = f"./data/personal_cluster_dfs/{cluster_model}.pkl"
-        if os.path.isfile(personal_cluster_file) and cluster_model != "":
-            print("audit_settings", personal_cluster_file, cluster_model)
-            topics_under_top, topics_over_top = utils.get_personal_clusters(cluster_model)
-            pers_cluster = topics_under_top + topics_over_top
-            pers_cluster_options = {
-                "label": "Personalized clusters",
-                "options": [{"value": i, "text": cluster} for i, cluster in enumerate(pers_cluster)],
-            }
-            clusters_options.insert(0, pers_cluster_options)
-
     clusters_for_tuning = utils.get_large_clusters(min_n=150)
     clusters_for_tuning_options = [{"value": i, "text": cluster} for i, cluster in enumerate(clusters_for_tuning)]  # Format for Svelecte UI element
 
@@ -86,54 +82,33 @@ def audit_settings():
         "personalized_models": user_models,
         "personalized_model_grp": grp_models,
         "perf_metrics": ["Average rating difference", "Mean Absolute Error (MAE)", "Root Mean Squared Error (RMSE)", "Mean Squared Error (MSE)"],
-        "breakdown_categories": ['Topic', 'Toxicity Category', 'Toxicity Severity'],
         "clusters": clusters_options,
         "clusters_for_tuning": clusters_for_tuning_options,
+        "user": user,
     }
     return json.dumps(context)
 
-########################################
-# ROUTE: /GET_USERS
-@app.route("/get_users")
-def get_users():
-    # Fetch page content
-    with open(f"./data/users_to_models.pkl", "rb") as f:
-        users_to_models = pickle.load(f)
-        users = list(users_to_models.keys())
-        context = {
-            "users": users,
-        }
-        return json.dumps(context)
 
 ########################################
 # ROUTE: /GET_AUDIT
 @app.route("/get_audit")
 def get_audit():
     pers_model = request.args.get("pers_model")
-    perf_metric = request.args.get("perf_metric")
-    breakdown_axis = request.args.get("breakdown_axis")
-    breakdown_sort = request.args.get("breakdown_sort")
-    n_topics = int(request.args.get("n_topics"))
     error_type = request.args.get("error_type")
     cur_user = request.args.get("cur_user")
     topic_vis_method = request.args.get("topic_vis_method") 
     if topic_vis_method == "null":
         topic_vis_method = "median"
 
-    if breakdown_sort == "difference":
-        sort_class_plot = True
-    elif breakdown_sort == "default":
-        sort_class_plot = False
+    if pers_model == "" or pers_model == "null" or pers_model == "undefined":
+        overall_perf = None
     else:
-        raise Exception("Invalid breakdown_sort value")
-
-    overall_perf = utils.show_overall_perf(
-        variant=pers_model,
-        error_type=error_type,
-        cur_user=cur_user,
-        breakdown_axis=breakdown_axis,
-        topic_vis_method=topic_vis_method,
-    )
+        overall_perf = utils.show_overall_perf(
+            cur_model=pers_model,
+            error_type=error_type,
+            cur_user=cur_user,
+            topic_vis_method=topic_vis_method,
+        )
 
     results = {
         "overall_perf": overall_perf,
@@ -143,60 +118,34 @@ def get_audit():
 ########################################
 # ROUTE: /GET_CLUSTER_RESULTS
 @app.route("/get_cluster_results")
-def get_cluster_results():
+def get_cluster_results(debug=DEBUG):
     pers_model = request.args.get("pers_model")
-    n_examples = int(request.args.get("n_examples"))
+    cur_user = request.args.get("cur_user")
     cluster = request.args.get("cluster")
-    example_sort = request.args.get("example_sort")
-    comparison_group = request.args.get("comparison_group")
     topic_df_ids = request.args.getlist("topic_df_ids")
     topic_df_ids = [int(val) for val in topic_df_ids[0].split(",") if val != ""]
     search_type = request.args.get("search_type")
     keyword = request.args.get("keyword")
-    n_neighbors = request.args.get("n_neighbors")
-    if n_neighbors != "null":
-        n_neighbors = int(n_neighbors)
-    neighbor_threshold = 0.6
     error_type = request.args.get("error_type")
     use_model = request.args.get("use_model") == "true"
-    scaffold_method = request.args.get("scaffold_method")
-        
 
-    # If user has a tuned model for this cluster, use that
-    cluster_model_file = f"./data/trained_models/{pers_model}_{cluster}.pkl"
-    if os.path.isfile(cluster_model_file):
-        pers_model = f"{pers_model}_{cluster}"
+    if debug:
+        print(f"get_cluster_results using model {pers_model}")
 
-    print(f"get_cluster_results using model {pers_model}")
-
-    other_ids = []
-    perf_metric = "avg_diff"
-    sort_ascending = True if example_sort == "ascending" else False
-
+    # Prepare cluster df (topic_df)
     topic_df = None
-    
-    personal_cluster_file = f"./data/personal_cluster_dfs/{pers_model}.pkl"
-    if (scaffold_method == "personal_cluster") and (os.path.isfile(personal_cluster_file)):
-        # Handle personal clusters
-        with open(personal_cluster_file, "rb") as f:
-            topic_df = pickle.load(f)
-            topic_df = topic_df[(topic_df["topic"] == cluster)]
-    else:
-        # Regular handling
-        with open(f"data/preds_dfs/{pers_model}.pkl", "rb") as f:
-            topic_df = pickle.load(f)
-        if search_type == "cluster":
-            # Display examples with comment, your pred, and other users' pred
-            topic_df = topic_df[(topic_df["topic"] == cluster) | (topic_df["item_id"].isin(topic_df_ids))]
-                
-        elif search_type == "neighbors":
-            neighbor_ids = utils.get_match(topic_df_ids, K=n_neighbors, threshold=neighbor_threshold, debug=False)
-            topic_df = topic_df[(topic_df["item_id"].isin(neighbor_ids)) | (topic_df["item_id"].isin(topic_df_ids))]
-        elif search_type == "keyword":
-            topic_df = topic_df[(topic_df["comment"].str.contains(keyword, case=False, regex=False)) | (topic_df["item_id"].isin(topic_df_ids))]
-    
+    preds_file = utils.get_preds_file(cur_user, pers_model)
+    with open(preds_file, "rb") as f:
+        topic_df = pickle.load(f)
+    if search_type == "cluster":
+        # Display examples with comment, your pred, and other users' pred
+        topic_df = topic_df[(topic_df["topic"] == cluster) | (topic_df["item_id"].isin(topic_df_ids))]
+    elif search_type == "keyword":
+        topic_df = topic_df[(topic_df["comment"].str.contains(keyword, case=False, regex=False)) | (topic_df["item_id"].isin(topic_df_ids))]
+
     topic_df = topic_df.drop_duplicates()
-    print("len topic_df", len(topic_df))
+    if debug:
+        print("len topic_df", len(topic_df))
 
     # Handle empty results
     if len(topic_df) == 0: 
@@ -217,18 +166,20 @@ def get_cluster_results():
 
     topic_df_ids = topic_df["item_id"].unique().tolist()
 
-    if (scaffold_method == "personal_cluster") and (os.path.isfile(personal_cluster_file)):
-        cluster_overview_plot_json, sampled_df = utils.plot_overall_vis_cluster(topic_df, error_type=error_type, n_comments=500)
+    # Prepare overview plot for the cluster
+    if use_model:
+        # Display results with the model as a reference point
+        cluster_overview_plot_json, sampled_df = utils.plot_overall_vis_cluster(cur_user, topic_df, error_type=error_type, n_comments=500)
     else:
-        # Regular
-        cluster_overview_plot_json, sampled_df = utils.get_cluster_overview_plot(topic_df, error_type=error_type, use_model=use_model)
+        # Display results without a model
+        cluster_overview_plot_json, sampled_df = utils.plot_overall_vis_cluster_no_model(cur_user, topic_df, n_comments=500)
 
-    cluster_comments = utils.get_cluster_comments(sampled_df,error_type=error_type, num_examples=n_examples, use_model=use_model)  # New version of cluster comment table
+    cluster_comments = utils.get_cluster_comments(sampled_df,error_type=error_type, use_model=use_model)  # New version of cluster comment table
 
     results = {
         "topic_df_ids": topic_df_ids,
         "cluster_overview_plot_json": json.loads(cluster_overview_plot_json),
-        "cluster_comments": cluster_comments, 
+        "cluster_comments": cluster_comments.to_json(orient="records"), 
     }
     return json.dumps(results)
 
@@ -255,7 +206,7 @@ def get_group_size():
 ########################################
 # ROUTE: /GET_GROUP_MODEL
 @app.route("/get_group_model")
-def get_group_model():
+def get_group_model(debug=DEBUG):
     # Fetch info for initial labeling component
     model_name = request.args.get("model_name")
     user = request.args.get("user")
@@ -275,28 +226,21 @@ def get_group_model():
     grp_ids = grp_df["worker_id"].tolist()
 
     ratings_grp = utils.get_grp_model_labels(
-        comments_df=comments_grouped_full_topic_cat,
         n_label_per_bin=BIN_DISTRIB,
         score_bins=SCORE_BINS,
         grp_ids=grp_ids,
     )
 
-    # print("ratings_grp", ratings_grp)
-
     # Modify model name
     model_name = f"{model_name}_group_gender{sel_gender}_relig{sel_relig}_pol{sel_pol}_race{sel_race_orig}_lgbtq_{sel_lgbtq}"
-
-    label_dir = f"./data/labels/{model_name}"
-    # Create directory for labels if it doesn't yet exist
-    if not os.path.isdir(label_dir):
-        os.mkdir(label_dir)
-    last_label_i = len([name for name in os.listdir(label_dir) if (os.path.isfile(os.path.join(label_dir, name)) and name.endswith('.pkl'))])
+    utils.setup_user_model_dirs(user, model_name)
 
     # Train group model
-    mae, mse, rmse, avg_diff, ratings_prev = utils.train_updated_model(model_name, last_label_i, ratings_grp, user)
+    mae, mse, rmse, avg_diff, ratings_prev = utils.train_updated_model(model_name, ratings_grp, user)
 
     duration = time.time() - start
-    print("Time to train/cache:", duration)
+    if debug:
+        print("Time to train/cache:", duration)
 
     context = {
         "group_size": group_size,
@@ -314,11 +258,10 @@ def get_labeling():
     clusters_for_tuning = utils.get_large_clusters(min_n=150)
     clusters_for_tuning_options = [{"value": i, "text": cluster} for i, cluster in enumerate(clusters_for_tuning)]  # Format for Svelecte UI element
 
-    # model_name_suggestion = f"model_{int(time.time())}"
-    model_name_suggestion = f"model_{user}"
+    model_name_suggestion = f"my_model"
 
     context = {
-        "personalized_models": utils.get_all_model_names(user),
+        "personalized_models": utils.get_user_model_names(user),
         "model_name_suggestion": model_name_suggestion,
         "clusters_for_tuning": clusters_for_tuning_options,
     }
@@ -326,15 +269,16 @@ def get_labeling():
 
 ########################################
 # ROUTE: /GET_COMMENTS_TO_LABEL
-N_LABEL_PER_BIN = 8 # 8 * 5 = 40 comments
-BIN_DISTRIB = [4, 8, 16, 8, 4]
+if DEBUG:
+    BIN_DISTRIB = [1, 2, 4, 2, 1]  # 10 comments
+else:
+    BIN_DISTRIB = [2, 4, 8, 4, 2]  # 20 comments
 SCORE_BINS = [(0.0, 0.5), (0.5, 1.5), (1.5, 2.5), (2.5, 3.5), (3.5, 4.01)]
 @app.route("/get_comments_to_label")
 def get_comments_to_label():
     n = int(request.args.get("n"))
     # Fetch examples to label
     to_label_ids = utils.create_example_sets(
-        comments_df=comments_grouped_full_topic_cat,
         n_label_per_bin=BIN_DISTRIB,
         score_bins=SCORE_BINS,
         keyword=None
@@ -351,14 +295,11 @@ def get_comments_to_label():
 
 ########################################
 # ROUTE: /GET_COMMENTS_TO_LABEL_TOPIC
-N_LABEL_PER_BIN_TOPIC = 2 # 2 * 5 = 10 comments
 @app.route("/get_comments_to_label_topic")
 def get_comments_to_label_topic():
     # Fetch examples to label
     topic = request.args.get("topic")
     to_label_ids = utils.create_example_sets(
-        comments_df=comments_grouped_full_topic_cat,
-        # n_label_per_bin=N_LABEL_PER_BIN_TOPIC,
         n_label_per_bin=BIN_DISTRIB,
         score_bins=SCORE_BINS,
         keyword=None,
@@ -375,38 +316,33 @@ def get_comments_to_label_topic():
 ########################################
 # ROUTE: /GET_PERSONALIZED_MODEL
 @app.route("/get_personalized_model")
-def get_personalized_model():
+def get_personalized_model(debug=DEBUG):
     model_name = request.args.get("model_name")
     ratings_json = request.args.get("ratings")
     mode = request.args.get("mode")
     user = request.args.get("user")
     ratings = json.loads(ratings_json)
-    print(ratings)
-    start = time.time()
+    if debug:
+        print(ratings)
+        start = time.time()
 
-    label_dir = f"./data/labels/{model_name}"
-    # Create directory for labels if it doesn't yet exist
-    if not os.path.isdir(label_dir):
-        os.mkdir(label_dir)
-    last_label_i = len([name for name in os.listdir(label_dir) if (os.path.isfile(os.path.join(label_dir, name)) and name.endswith('.pkl'))])
+    utils.setup_user_model_dirs(user, model_name)
 
     # Handle existing or new model cases
     if mode == "view":
         # Fetch prior model performance
-        if model_name not in utils.get_all_model_names():
-            raise Exception(f"Model {model_name} does not exist")
-        else:
-            mae, mse, rmse, avg_diff, ratings_prev = utils.fetch_existing_data(model_name, last_label_i)
+        mae, mse, rmse, avg_diff, ratings_prev = utils.fetch_existing_data(user, model_name)
         
     elif mode == "train":
         # Train model and cache predictions using new labels
         print("get_personalized_model train")
-        mae, mse, rmse, avg_diff, ratings_prev = utils.train_updated_model(model_name, last_label_i, ratings, user)
-        
-    duration = time.time() - start
-    print("Time to train/cache:", duration) 
+        mae, mse, rmse, avg_diff, ratings_prev = utils.train_updated_model(model_name, ratings, user)
+    
+    if debug:
+        duration = time.time() - start
+        print("Time to train/cache:", duration) 
 
-    perf_plot, mae_status = utils.plot_train_perf_results(model_name, mae)
+    perf_plot, mae_status = utils.plot_train_perf_results(user, model_name, mae)
     perf_plot_json = perf_plot.to_json()
 
     def round_metric(x):
@@ -419,7 +355,6 @@ def get_personalized_model():
         "mse": round_metric(mse),
         "rmse": round_metric(rmse),
         "avg_diff": round_metric(avg_diff),
-        "duration": duration,
         "ratings_prev": ratings_prev,
         "perf_plot_json": json.loads(perf_plot_json),
     }
@@ -429,34 +364,29 @@ def get_personalized_model():
 ########################################
 # ROUTE: /GET_PERSONALIZED_MODEL_TOPIC
 @app.route("/get_personalized_model_topic")
-def get_personalized_model_topic():
+def get_personalized_model_topic(debug=DEBUG):
     model_name = request.args.get("model_name")
     ratings_json = request.args.get("ratings")
     user = request.args.get("user")
     ratings = json.loads(ratings_json)
     topic = request.args.get("topic")
-    print(ratings)
+    if debug:
+        print(ratings)
     start = time.time()
 
     # Modify model name
     model_name = f"{model_name}_{topic}"
-
-    label_dir = f"./data/labels/{model_name}"
-    # Create directory for labels if it doesn't yet exist
-    if not os.path.isdir(label_dir):
-        os.mkdir(label_dir)
-    last_label_i = len([name for name in os.listdir(label_dir) if (os.path.isfile(os.path.join(label_dir, name)) and name.endswith('.pkl'))])
+    utils.setup_user_model_dirs(user, model_name)
 
     # Handle existing or new model cases
     # Train model and cache predictions using new labels
-    print("get_personalized_model_topic train")
-    mae, mse, rmse, avg_diff, ratings_prev = utils.train_updated_model(model_name, last_label_i, ratings, user, topic=topic)
+    if debug:
+        print("get_personalized_model_topic train")
+    mae, mse, rmse, avg_diff, ratings_prev = utils.train_updated_model(model_name, ratings, user, topic=topic)
         
-    duration = time.time() - start
-    print("Time to train/cache:", duration) 
-
-    def round_metric(x):
-        return np.round(abs(x), 3)
+    if debug:
+        duration = time.time() - start
+        print("Time to train/cache:", duration) 
 
     results = {
         "success": "success",
@@ -477,17 +407,13 @@ def get_reports():
     if topic_vis_method == "null":
         topic_vis_method = "fp_fn"
 
-    # Load reports for current user from stored files
-    report_dir = f"./data/user_reports"
-    user_file = os.path.join(report_dir, f"{cur_user}_{scaffold_method}.pkl")
-
-    if not os.path.isfile(user_file):
+    # Load reports for current user from stored file
+    reports_file = utils.get_reports_file(cur_user, model)
+    if not os.path.isfile(reports_file):
         if scaffold_method == "fixed":
             reports = get_fixed_scaffold()
         elif (scaffold_method == "personal" or scaffold_method == "personal_group" or scaffold_method == "personal_test"):
-            reports = get_personal_scaffold(model, topic_vis_method)
-        elif (scaffold_method == "personal_cluster"):
-            reports = get_personal_cluster_scaffold(model)
+            reports = get_personal_scaffold(cur_user, model, topic_vis_method)
         elif scaffold_method == "prompts":
             reports = get_prompts_scaffold()
         elif scaffold_method == "tutorial":
@@ -505,8 +431,8 @@ def get_reports():
             ]
     else:
         # Load from pickle file
-        with open(user_file, "rb") as f:
-            reports = pickle.load(f)
+        with open(reports_file, "rb") as f:
+            reports = json.load(f)
 
     results = {
         "reports": reports,
@@ -572,23 +498,13 @@ def get_tutorial_scaffold():
         },
     ] 
 
-def get_personal_cluster_scaffold(model):
-    topics_under_top, topics_over_top = utils.get_personal_clusters(model)
-
-    report_under = [get_empty_report(topic, "System is under-sensitive") for topic in topics_under_top]
-
-    report_over = [get_empty_report(topic, "System is over-sensitive") for topic in topics_over_top]
-    reports = (report_under + report_over)
-    random.shuffle(reports)
-    return reports
-
 def get_topic_errors(df, topic_vis_method, threshold=2):
-    topics = df["topic_"].unique().tolist()
+    topics = df["topic"].unique().tolist()
     topic_errors = {}
     for topic in topics:
-        t_df = df[df["topic_"] == topic]
-        y_true = t_df["pred"].to_numpy()
-        y_pred = t_df["rating"].to_numpy()
+        t_df = df[df["topic"] == topic]
+        y_true = t_df["pred"].to_numpy()  # Predicted user rating (treated as ground truth)
+        y_pred = t_df["rating_sys"].to_numpy()  # System rating (which we're auditing)
         if topic_vis_method == "mae":
             t_err = mean_absolute_error(y_true, y_pred)
         elif topic_vis_method == "mse":
@@ -596,8 +512,8 @@ def get_topic_errors(df, topic_vis_method, threshold=2):
         elif topic_vis_method == "avg_diff":
             t_err = np.mean(y_true - y_pred)
         elif topic_vis_method == "fp_proportion":
-            y_true = [0 if rating < threshold else 1 for rating in t_df["pred"].tolist()]
-            y_pred = [0 if rating < threshold else 1 for rating in t_df["rating"].tolist()]
+            y_true = [0 if rating < threshold else 1 for rating in y_true]
+            y_pred = [0 if rating < threshold else 1 for rating in y_pred]
             try:
                 tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
             except:
@@ -605,8 +521,8 @@ def get_topic_errors(df, topic_vis_method, threshold=2):
             total = float(len(y_true))
             t_err = fp / total
         elif topic_vis_method == "fn_proportion":
-            y_true = [0 if rating < threshold else 1 for rating in t_df["pred"].tolist()]
-            y_pred = [0 if rating < threshold else 1 for rating in t_df["rating"].tolist()]
+            y_true = [0 if rating < threshold else 1 for rating in y_true]
+            y_pred = [0 if rating < threshold else 1 for rating in y_pred]
             try:
                 tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
             except:
@@ -617,65 +533,69 @@ def get_topic_errors(df, topic_vis_method, threshold=2):
         
     return topic_errors
 
-def get_personal_scaffold(model, topic_vis_method, n_topics=200, n=5):
+def get_personal_scaffold(cur_user, model, topic_vis_method, n_topics=200, n=5, debug=DEBUG):
     threshold = utils.get_toxic_threshold()
 
     # Get topics with greatest amount of error
-    with open(f"./data/preds_dfs/{model}.pkl", "rb") as f:
+    preds_file = utils.get_preds_file(cur_user, model)
+    with open(preds_file, "rb") as f:
         preds_df = pickle.load(f)
-        preds_df_mod = preds_df.merge(utils.get_comments_grouped_full_topic_cat(), on="item_id", how="left", suffixes=('_', '_avg'))
-        preds_df_mod = preds_df_mod[preds_df_mod["user_id"] == "A"].sort_values(by=["item_id"]).reset_index()
-        preds_df_mod = preds_df_mod[preds_df_mod["topic_id_"] < n_topics]
+        preds_df_mod = preds_df[preds_df["user_id"] == cur_user].sort_values(by=["item_id"]).reset_index()
+        preds_df_mod = preds_df_mod[preds_df_mod["topic_id"] < n_topics]
 
         if topic_vis_method == "median":
-            df = preds_df_mod.groupby(["topic_", "user_id"]).median().reset_index()
+            df = preds_df_mod.groupby(["topic", "user_id"]).median().reset_index()
         elif topic_vis_method == "mean":
-            df = preds_df_mod.groupby(["topic_", "user_id"]).mean().reset_index()
+            df = preds_df_mod.groupby(["topic", "user_id"]).mean().reset_index()
         elif topic_vis_method == "fp_fn":
             for error_type in ["fn_proportion", "fp_proportion"]:
                 topic_errors = get_topic_errors(preds_df_mod, error_type)
-                preds_df_mod[error_type] = [topic_errors[topic] for topic in preds_df_mod["topic_"].tolist()]
-            df = preds_df_mod.groupby(["topic_", "user_id"]).mean().reset_index()
+                preds_df_mod[error_type] = [topic_errors[topic] for topic in preds_df_mod["topic"].tolist()]
+            df = preds_df_mod.groupby(["topic", "user_id"]).mean().reset_index()
         else:
             # Get error for each topic
             topic_errors = get_topic_errors(preds_df_mod, topic_vis_method)
-            preds_df_mod[topic_vis_method] = [topic_errors[topic] for topic in preds_df_mod["topic_"].tolist()]
-            df = preds_df_mod.groupby(["topic_", "user_id"]).mean().reset_index()
+            preds_df_mod[topic_vis_method] = [topic_errors[topic] for topic in preds_df_mod["topic"].tolist()]
+            df = preds_df_mod.groupby(["topic", "user_id"]).mean().reset_index()
 
         # Get system error
-        df = df[(df["topic_"] != "53_maiareficco_kallystas_dyisisitmanila_tractorsazi") & (df["topic_"] != "79_idiot_dumb_stupid_dumber")]
+        junk_topics = ["53_maiareficco_kallystas_dyisisitmanila_tractorsazi", "-1_dude_bullshit_fight_ain"]
+        df = df[~df["topic"].isin(junk_topics)]  # Exclude known "junk topics"
         
         if topic_vis_method == "median" or topic_vis_method == "mean":
-            df["error_magnitude"] = [utils.get_error_magnitude(sys, user, threshold) for sys, user in zip(df["rating"].tolist(), df["pred"].tolist())]
-            df["error_type"] = [utils.get_error_type_radio(sys, user, threshold) for sys, user in zip(df["rating"].tolist(), df["pred"].tolist())]
+            df["error_magnitude"] = [utils.get_error_magnitude(sys, user, threshold) for sys, user in zip(df["rating_sys"].tolist(), df["pred"].tolist())]
+            df["error_type"] = [utils.get_error_type_radio(sys, user, threshold) for sys, user in zip(df["rating_sys"].tolist(), df["pred"].tolist())]
 
             df_under = df[df["error_type"] == "System is under-sensitive"]
             df_under = df_under.sort_values(by=["error_magnitude"], ascending=False).head(n) # surface largest errors first
-            report_under = [get_empty_report(row["topic_"], row["error_type"]) for _, row in df_under.iterrows()]
+            report_under = [get_empty_report(row["topic"], row["error_type"]) for _, row in df_under.iterrows()]
 
             df_over = df[df["error_type"] == "System is over-sensitive"]
             df_over = df_over.sort_values(by=["error_magnitude"], ascending=False).head(n) # surface largest errors first
-            report_over = [get_empty_report(row["topic_"], row["error_type"]) for _, row in df_over.iterrows()]
+            report_over = [get_empty_report(row["topic"], row["error_type"]) for _, row in df_over.iterrows()]
             
             # Set up reports
-            # return [get_empty_report(row["topic_"], row["error_type"]) for index, row in df.iterrows()]
             reports = (report_under + report_over)
             random.shuffle(reports)
         elif topic_vis_method == "fp_fn":
             df_under = df.sort_values(by=["fn_proportion"], ascending=False).head(n)
             df_under = df_under[df_under["fn_proportion"] > 0]
-            report_under = [get_empty_report(row["topic_"], "System is under-sensitive") for _, row in df_under.iterrows()]
+            if debug:
+                print(df_under[["topic", "fn_proportion"]])
+            report_under = [get_empty_report(row["topic"], "System is under-sensitive") for _, row in df_under.iterrows()]
             
             df_over = df.sort_values(by=["fp_proportion"], ascending=False).head(n)
             df_over = df_over[df_over["fp_proportion"] > 0]
-            report_over = [get_empty_report(row["topic_"], "System is over-sensitive") for _, row in df_over.iterrows()]
+            if debug:
+                print(df_over[["topic", "fp_proportion"]])
+            report_over = [get_empty_report(row["topic"], "System is over-sensitive") for _, row in df_over.iterrows()]
 
             reports = (report_under + report_over)
             random.shuffle(reports)
         else:
             df = df.sort_values(by=[topic_vis_method], ascending=False).head(n * 2)
-            df["error_type"] = [utils.get_error_type_radio(sys, user, threshold) for sys, user in zip(df["rating"].tolist(), df["pred"].tolist())]
-            reports = [get_empty_report(row["topic_"], row["error_type"]) for _, row in df.iterrows()]
+            df["error_type"] = [utils.get_error_type_radio(sys, user, threshold) for sys, user in zip(df["rating_sys"].tolist(), df["pred"].tolist())]
+            reports = [get_empty_report(row["topic"], row["error_type"]) for _, row in df.iterrows()]
 
         return reports
 
@@ -718,20 +638,69 @@ def get_prompts_scaffold():
         },
     ]
 
+# Filter to eligible reports: those that have been marked complete and include at least one piece of evidence.
+def get_eligible_reports(reports):
+    eligible_reports = []
+    for r in reports:
+        if (r["complete_status"] == True) and (len(r["evidence"]) > 0):
+            eligible_reports.append(r)
+    return eligible_reports
+
+# Submit all reports to AVID
+# Logs the responses
+def submit_reports_to_AVID(reports, cur_user, email, sep_selection, debug=DEBUG):
+    # Set up the connection to AVID
+    root = os.environ.get('AVID_API_URL')
+    api_key = os.environ.get('AVID_API_KEY')
+    key = {"Authorization": api_key}
+
+    reports = get_eligible_reports(reports)
+    if debug:
+        print("Num eligible reports:", len(reports))
+    
+    for r in reports:
+        new_report = utils.convert_indie_label_json_to_avid_json(r, cur_user, email, sep_selection)
+        url = root + "submit"
+        response = requests.post(url, json=json.loads(new_report), headers=key) # The loads ensures type compliance
+        uuid = response.json()
+        if debug:
+            print("Report", new_report)
+            print("AVID API response:", response, uuid)
+
 ########################################
 # ROUTE: /SAVE_REPORTS
 @app.route("/save_reports")
-def save_reports():
+def save_reports(debug=DEBUG):
     cur_user = request.args.get("cur_user")
     reports_json = request.args.get("reports")
     reports = json.loads(reports_json)
-    scaffold_method = request.args.get("scaffold_method")
+    model = request.args.get("model")
 
-    # Save reports for current user to stored files
-    report_dir = f"./data/user_reports"
-    # Save to pickle file
-    with open(os.path.join(report_dir, f"{cur_user}_{scaffold_method}.pkl"), "wb") as f:
-        pickle.dump(reports, f)
+    # Save reports for current user to file
+    reports_file = utils.get_reports_file(cur_user, model)
+    with open(reports_file, "w", encoding ='utf8') as f:
+        json.dump(reports, f)
+
+    results = {
+        "status": "success",
+    }
+    if debug:
+        print(results)
+    return json.dumps(results)
+
+########################################
+# ROUTE: /SUBMIT_AVID_REPORT
+@app.route("/submit_avid_report")
+def submit_avid_report():
+    cur_user = request.args.get("cur_user")
+    email = request.args.get("email")
+    sep_selection = request.args.get("sep_selection")
+    reports_json = request.args.get("reports")
+
+    reports = json.loads(reports_json)
+
+    # Submit reports to AVID
+    submit_reports_to_AVID(reports, cur_user, email, sep_selection)
 
     results = {
         "status": "success",
@@ -746,50 +715,11 @@ def get_explore_examples():
     n_examples = int(request.args.get("n_examples"))
 
     # Get sample of examples
-    df = utils.get_comments_grouped_full_topic_cat().sample(n=n_examples)
-
-    df["system_decision"] = [utils.get_decision(rating, threshold) for rating in df["rating"].tolist()]
-    df["system_color"] = [utils.get_user_color(sys, threshold) for sys in df["rating"].tolist()]  # get cell colors
-
+    df = utils.get_explore_df(n_examples, threshold)
     ex_json = df.to_json(orient="records")
 
     results = {
         "examples": ex_json,
-    }
-    return json.dumps(results)
-
-########################################
-# ROUTE: /GET_RESULTS
-@app.route("/get_results")
-def get_results():
-    users = request.args.get("users")
-    if users != "":
-        users = users.split(",")
-    # print("users", users)
-
-    IGNORE_LIST = ["DemoUser"]
-    report_dir = f"./data/user_reports"
-    
-
-    # For each user, get personal and prompt results
-    # Get links to label pages and audit pages
-    results = []
-    for user in users:
-        if user not in IGNORE_LIST:
-            user_results = {}
-            user_results["user"] = user
-            for scaffold_method in ["personal", "personal_group", "prompts"]:
-                # Get results
-                user_file = os.path.join(report_dir, f"{user}_{scaffold_method}.pkl")
-                if os.path.isfile(user_file):
-                    with open(user_file, "rb") as f:
-                        user_results[scaffold_method] = pickle.load(f)
-            results.append(user_results)
-
-    # print("results", results)
-
-    results = {
-        "results": results,
     }
     return json.dumps(results)
 

@@ -7,7 +7,6 @@
     import HelpTooltip from "./HelpTooltip.svelte";
     import TopicTraining from "./TopicTraining.svelte";
 
-    import { user } from './stores/cur_user_store.js';
     import { error_type } from './stores/error_type_store.js';
     import { topic_chosen } from './stores/cur_topic_store.js';
     import { model_chosen } from './stores/cur_model_store.js';
@@ -17,15 +16,13 @@
     import LayoutGrid, { Cell } from "@smui/layout-grid";
     import Radio from '@smui/radio';
     import FormField from '@smui/form-field';
-    import Card, { Content } from '@smui/card';
     import{ Wrapper } from '@smui/tooltip';
     import IconButton from '@smui/icon-button';
-    import Select, { Option } from "@smui/select";
     import Svelecte from '../node_modules/svelecte/src/Svelecte.svelte';
 
     export let personalized_model;
-    // export let topic;
     export let cur_error_type = "Both";
+    export let cur_user;
 
     let evidence = [];
     let show_audit_settings = false;
@@ -54,8 +51,6 @@
     ]
     
     let personalized_models = [];
-    let breakdown_category;
-    let breakdown_categories = [];
     let systems = ["YouSocial comment toxicity classifier"]; // Only one system for now
     let clusters = [];
     let clusters_for_tuning = []
@@ -75,7 +70,6 @@
     let audit_type;
     if (scaffold_method == "fixed" || scaffold_method == "personal" || scaffold_method == "personal_group" || scaffold_method == "personal_test" || scaffold_method == "personal_cluster" || scaffold_method == "topic_train" || scaffold_method == "prompts") {
         audit_type = audit_types[1];
-        // audit_type = audit_types[0];
     } else {
         // No scaffolding mode or tutorial
         audit_type = audit_types[0];
@@ -99,18 +93,7 @@
         use_group_model = true;
     }
     
-    // TEMP
     let promise_cluster = Promise.resolve(null);
-
-    // Get current user from store
-    let cur_user;
-    user.subscribe(value => {
-        if (value != cur_user) {
-            cur_user = value;
-            personalized_model = "";
-            getAuditSettings();
-        }
-	});
 
     // Get current topic from store
     let topic;
@@ -126,8 +109,7 @@
         if (!personalized_models.includes(personalized_model)) {
             personalized_models.push(personalized_model);
         }
-
-        handleClusterButton(); // re-render cluster results
+        getAuditResults();
 	});
 
     // Save current error type
@@ -137,17 +119,13 @@
         handleClusterButton();
 	}
 
-    // Handle topic-specific training
-    // let topic_training = null;
-
     async function updateTopicChosen() {
         if (topic != null) {
-            console.log("updateTopicChosen", topic)
             topic_chosen.update((value) => topic);
         }
     }
 
-    function getAuditSettings() {
+    function getAuditResults() {
         let req_params = {
             user: cur_user,
             scaffold_method: scaffold_method,
@@ -157,8 +135,6 @@
             .then((r) => r.text())
             .then(function (r_orig) {
                 let r = JSON.parse(r_orig);
-                breakdown_categories = r["breakdown_categories"];
-                breakdown_category = breakdown_categories[0];
                 personalized_models = r["personalized_models"];
                 if (use_group_model) {
                     let personalized_model_grp = r["personalized_model_grp"];
@@ -170,26 +146,27 @@
                 model_chosen.update((value) => personalized_model);
                 clusters = r["clusters"];
                 clusters_for_tuning = r["clusters_for_tuning"];
-                console.log("clusters", clusters); // TEMP
                 topic = clusters[0]["options"][0]["text"];
                 topic_chosen.update((value) => topic);
-                handleAuditButton();  // TEMP
-                handleClusterButton(); // TEMP
+                handleAuditButton(); 
+                handleClusterButton();
             });
     }
     onMount(async () => {
-        getAuditSettings();
+        getAuditResults();
     });
 
     function handleAuditButton() {
         model_chosen.update((value) => personalized_model);
-        promise = getAudit();
+        if (personalized_model == "" || personalized_model == undefined) {
+            return;
+        }
+        promise = getAudit(personalized_model);
     }
 
-    async function getAudit() {
+    async function getAudit(pers_model) {
         let req_params = {
-            pers_model: personalized_model,
-            breakdown_axis: breakdown_category,
+            pers_model: pers_model,
             perf_metric: "avg_diff",
             breakdown_sort: "difference",
             n_topics: 10,
@@ -205,23 +182,22 @@
     }
 
     function handleClusterButton() {
-		promise_cluster = getCluster();
+		promise_cluster = getCluster(personalized_model);
 	}
 
-	async function getCluster() {
-        if (personalized_model == "" || personalized_model == undefined) {
+	async function getCluster(pers_model) {
+        if (pers_model == "" || pers_model == undefined) {
             return null;
         }
 		let req_params = {
 			cluster: topic,
 			topic_df_ids: [],
-			n_examples: 500, // TEMP
-			pers_model: personalized_model,
+            cur_user: cur_user,
+			pers_model: pers_model,
 			example_sort: "descending", // TEMP
 			comparison_group: "status_quo", // TEMP
 			search_type: "cluster",
 			keyword: "",
-			n_neighbors: 0,
             error_type: cur_error_type,
             use_model: use_model,
             scaffold_method: scaffold_method,
@@ -230,7 +206,6 @@
 		const response = await fetch("./get_cluster_results?" + params);
 		const text = await response.text();
 		const data = JSON.parse(text);
-		console.log(topic);
 		return data;
 	}
 </script>
@@ -240,16 +215,13 @@
     <div>
         <div style="margin-top: 30px">
             <span class="head_3">Auditing</span>
-            <IconButton 
-                class="material-icons grey_button"
-                size="normal"
-                on:click={() => (show_audit_settings = !show_audit_settings)}
-            >
-                help_outline
-            </IconButton>
         </div>
         <div style="width: 80%">
+            {#if personalized_model}
             <p>In this section, we'll be auditing the content moderation system. Here, you’ll be aided by a personalized model that will help direct your attention towards potential problem areas in the model’s performance. This model isn’t meant to be perfect, but is designed to help you better focus on areas that need human review.</p>
+            {:else}
+            <p>Please first train your personalized model by following the steps in the "Labeling" tab (click the top left tab above).</p>
+            {/if}
         </div>
         
         {#if show_audit_settings}
@@ -299,11 +271,14 @@
                 </LayoutGrid>
             </div>
         </div>
+        {/if}
+        {#if personalized_model}
         <p>Current model: {personalized_model}</p>
         {/if}
     </div>
 
     <!-- 1: All topics overview -->
+    {#if personalized_model}
     {#if audit_type == audit_types[0]}
     <div class="audit_section">
         <div class="head_5">Overview of all topics</div>
@@ -364,7 +339,7 @@
                     </li>
                 </ul>
                 {#key topic}
-                <TopicTraining topic={topic} />
+                <TopicTraining topic={topic} cur_user={cur_user}/>
                 {/key}                    
             </div>
 
@@ -425,7 +400,7 @@
                             clusters={clusters} 
                             model={personalized_model} 
                             data={cluster_results} 
-                            table_width_pct={90}
+                            table_width_pct={100}
                             table_id={"main"}
                             use_model={use_model}
                             bind:evidence={evidence} 
@@ -447,7 +422,7 @@
         <p>Next, you can optionally search for more comments to serve as evidence through manual keyword search (for individual words or phrases).</p>
         <div class="section_indent">
             {#key error_type}
-            <KeywordSearch clusters={clusters} personalized_model={personalized_model} bind:evidence={evidence} use_model={use_model} on:change/>
+            <KeywordSearch clusters={clusters} personalized_model={personalized_model} cur_user={cur_user} bind:evidence={evidence} use_model={use_model} on:change/>
             {/key}
         </div>
     </div>
@@ -457,7 +432,7 @@
         <div class="head_5">Finalize your current report</div>
         <p>Finally, review the report you've generated on the side panel and provide a brief summary of the problem you see. You may also list suggestions or insights into addressing this problem if you have ideas. This report will be directly used by the model developers to address the issue you've raised</p>
     </div>
-    
+    {/if}
 </div>
 
 <style>
