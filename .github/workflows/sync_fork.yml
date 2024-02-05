@@ -1,0 +1,19 @@
+name: Sync Fork
+
+on:
+  schedule:
+    - cron: '0,30 * * * *' 
+  workflow_dispatch: # on button click
+
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: GitHub Sync to Upstream Repository
+        uses: rovast/sync-upstream-repo@v0.0.1
+        with: 
+          upstream_repo: https://github.com/StanfordHCI/indie-label.git
+          upstream_branch: main
+          downstream_branch: docker-hf
+          token: ${{ secrets.WORKFLOW_TOKEN }}
