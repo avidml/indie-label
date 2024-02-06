@@ -17,4 +17,4 @@ jobs:
       - name: Push to hub
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: git push https://:avid-ml$HF_TOKEN@huggingface.co/spaces/avid-ml/indie-label docker-hf:main
+        run: git push https://avid-ml:$HF_TOKEN@huggingface.co/spaces/avid-ml/indie-label docker-hf:main
