@@ -54,12 +54,6 @@ input, button, select, textarea {
 	border-radius: 2px;
 }
 
-a {
-	-webkit-padding: 0.4em 0;
-	padding: 0.4em;
-	margin: 0 0 0.5em 0;
-}
-
 input:disabled {
 	color: #ccc;
 }
@@ -341,4 +335,10 @@ table {
 }
 .smui-button--color-secondary.mdc-button--outlined:not(:disabled) {
     border-color: var(--mdc-theme-secondary) !important;
+}
+.smui-button--color-secondary .mdc-button__ripple::before, .smui-button--color-secondary .mdc-button__ripple::after {
+	background-color: var(--mdc-theme-secondary) !important;
+}
+.smui-button--color-secondary:not(:disabled) .mdc-button__icon {
+	color: var(--mdc-theme-secondary) !important;
 }
