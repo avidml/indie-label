@@ -120,7 +120,7 @@ h6 {
 	font-weight: bold;
 	font-size: 16px;
 	margin-top: 25px;
-	margin-bottom: 25px;
+	margin-bottom: 15px;
 }
 
 .head_6_non_cap {
@@ -203,6 +203,11 @@ table {
 .spacing_vert_60 {
 	margin: 60px 0;
 }
+
+.spacing_vert_100_bottom {
+	margin: 0 0 100px 0;
+}
+
 
 .page_title {
 	font-size: 30px;
@@ -319,4 +324,21 @@ table {
 
 .mdc-drawer .mdc-deprecated-list-item {
 	height: 64px !important;
+}
+
+/* Material UI secondary button formatting */
+:root {
+	--mdc-theme-secondary: #676778;
+}
+.smui-button--color-secondary:not(:disabled) {
+    color: var(--mdc-theme-secondary) !important;
+}
+.smui-button--color-secondary.mdc-button--outlined:not(:disabled) {
+    border-color: var(--mdc-theme-secondary) !important;
+}
+.smui-button--color-secondary .mdc-button__ripple::before, .smui-button--color-secondary .mdc-button__ripple::after {
+	background-color: var(--mdc-theme-secondary) !important;
+}
+.smui-button--color-secondary:not(:disabled) .mdc-button__icon {
+	color: var(--mdc-theme-secondary) !important;
 }

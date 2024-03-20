@@ -1,10 +1,10 @@
 {
-  "name": "svelte-vega-sample",
+  "name": "indie-label",
   "version": "0.0.0",
-  "author": "Alex Bäuerle <bauerlealex@gmail.com> (https://a13x.io)",
-  "repository": "git@github.com:vega/svelte-vega.git",
+  "author": "Michelle Lam <michelle123lam@gmail.com> (http://michelle123lam.github.io)",
+  "repository": "git@github.com:StanfordHCI/indie-label.git",
   "bugs": {
-    "url": "https://github.com/vega/svelte-vega/issues"
+    "url": "https://github.com/StanfordHCI/indie-label/issues"
   },
   "private": true,
   "scripts": {
@@ -25,7 +25,7 @@
     "@smui/checkbox": "^6.0.0-beta.2",
     "@smui/chips": "^6.0.0-beta.2",
     "@smui/circular-progress": "^6.0.0-beta.4",
-    "@smui/common": "^6.0.0-beta.2",
+    "@smui/common": "^6.1.4",
     "@smui/data-table": "^6.0.0-beta.2",
     "@smui/drawer": "^6.0.0-beta.4",
     "@smui/form-field": "^6.0.0-beta.2",

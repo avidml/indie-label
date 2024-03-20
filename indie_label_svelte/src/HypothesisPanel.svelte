@@ -1,10 +1,12 @@
 <script lang="ts">
     import { onMount } from "svelte";
+    import { fade } from 'svelte/transition';
     import ClusterResults from "./ClusterResults.svelte";
     import SubmitReportDialog from "./SubmitReportDialog.svelte";
 
     import Button, { Label } from "@smui/button";
     import Textfield from '@smui/textfield';
+    import Select, { Option } from "@smui/select";
     import { new_evidence } from './stores/new_evidence_store.js';
     import { open_evidence } from './stores/open_evidence_store.js';
     import { topic_chosen } from './stores/cur_topic_store.js';
@@ -22,6 +24,7 @@
     import Checkbox from '@smui/checkbox';
     import FormField from '@smui/form-field';
     import IconButton from "@smui/icon-button";
+    import { Icon } from "@smui/common";
     import Radio from '@smui/radio';
 
     export let model;
@@ -50,6 +53,8 @@
     let editTitle = false;
     let editErrorType = false;
     let unfinished_count = 0;
+    let has_complete_report = false;
+    let save_check_visible = false;  // Whether the save checkmark is visible
     
     function setActive(value: string) {
         selected = value;
@@ -90,7 +95,8 @@
         selected = all_reports[0];
         setActive(selected);
         cur_open_evidence = selected["evidence"];
-        unfinished_count = all_reports.filter(item => !item.complete_status).length
+        unfinished_count = all_reports.filter(item => (item.evidence.length == 0) || (item.text_entry == "") || !(item.sep_selection)).length
+        has_complete_report = hasCompleteReport();
         return all_reports;
     }
 
@@ -129,7 +135,11 @@
 
     let promise_save = Promise.resolve(null);
     function handleSaveReport() {
+        // Briefly display checkmark
         promise_save = saveReport();
+        save_check_visible = true;
+        // Hide save checkmark after 1 second
+        setTimeout(() => save_check_visible = false, 1000);
     }
 
     async function saveReport() {
@@ -143,6 +153,8 @@
         const response = await fetch("./save_reports?" + params);
         const text = await response.text();
         const data = JSON.parse(text);
+        
+        has_complete_report = hasCompleteReport();
         return data;
     }
 
@@ -152,15 +164,14 @@
             error_type: "",
             evidence: [],
             text_entry: "",
-            complete_status: false,
+            sep_selection: "",
         };
         all_reports = all_reports.concat(new_report);
         promise = Promise.resolve(all_reports);
         // Open this new report
         selected = all_reports[all_reports.length - 1];
         cur_open_evidence = selected["evidence"];
-        selected["complete_status"] = false;
-        unfinished_count = all_reports.filter(item => !item.complete_status).length
+        unfinished_count = all_reports.filter(item => (item.evidence.length == 0) || (item.text_entry == "") || !(item.sep_selection)).length
     }
 
     function handleDeleteReport() {
@@ -169,13 +180,11 @@
         promise = Promise.resolve(all_reports);
         selected  = all_reports[0];
         cur_open_evidence = selected["evidence"];
-        unfinished_count = all_reports.filter(item => !item.complete_status).length
+        unfinished_count = all_reports.filter(item => (item.evidence.length == 0) || (item.text_entry == "") || !(item.sep_selection)).length
     }
 
-    function handleMarkComplete() {
-        selected["complete_status"] = !selected["complete_status"];
-        unfinished_count = all_reports.filter(item => !item.complete_status).length
-        handleSaveReport(); // Auto-save report
+    function hasCompleteReport() {
+        return all_reports.some(item => (item.evidence.length > 0) && (item.text_entry != "") && (item.sep_selection));
     }
 
     // Error type
@@ -208,6 +217,14 @@
         editErrorType = false;
 	}
 
+    // SEP selection
+    let all_sep_options = [
+        "Accuracy",
+        "Bias/Discrimination",
+        "Adversarial Example",
+        "Other",
+    ];
+
     let promise_submit = Promise.resolve(null);
     function handleSubmitReport() {
         promise_submit = submitReport();
@@ -231,8 +248,8 @@
         <div class="panel_header">
             <div class="panel_header_content">
                 <div class="page_header">
-                    <img src="/logo.png" style="height: 50px; padding: 0px 20px;" alt="IndieLabel" />
-                    <Button class="user_button" color="secondary" style="margin: 12px 10px;" >
+                    <img src="/logo.png" style="height: 50px;" alt="IndieLabel" />
+                    <Button class="user_button" color="secondary" style="margin: 0 5px; padding: 0 5px;" >
                         <Label>User: {cur_user}</Label>
                     </Button>
                 </div>
@@ -242,7 +259,7 @@
                         on:click={() => (open = !open)}
                         color="primary"
                         disabled={model == null}
-                        style="float: right; padding: 10px; margin-right: 10px;"
+                        style="float: right; padding: 0 5px; margin: 0 5px; max-width: 200px;"
                     >
                         {#if open}
                         <Label>Close</Label>
@@ -284,7 +301,7 @@
                                         on:click={() => setActive(report)}
                                         activated={selected === report}
                                     >   
-                                        {#if report["complete_status"]}
+                                        {#if (report["evidence"].length > 0) && (report["text_entry"] != "") && (report["sep_selection"])}
                                         <Graphic class="material-icons" aria-hidden="true">task_alt</Graphic>
                                         {:else}
                                         <Graphic class="material-icons" aria-hidden="true">radio_button_unchecked</Graphic>
@@ -412,7 +429,7 @@
                                     {/key}
                                 </div>
 
-                                <div class="spacing_vert_60">
+                                <div class="spacing_vert_40">
                                     <div class="head_6">
                                         <b>Summary/Suggestions</b>
                                     </div>
@@ -430,14 +447,17 @@
                                     
                                 </div>
 
-                                <div class="spacing_vert_40">
+                                <div class="spacing_vert_40 spacing_vert_100_bottom">
                                     <div class="head_6">
-                                        <b>Mark report as complete?</b>
-                                        <FormField>
-                                            <Checkbox checked={selected["complete_status"]} on:change={handleMarkComplete} />
-                                        </FormField>
+                                        <b>Audit Category</b>
                                     </div>
-                                    
+                                    <div>
+                                        <Select bind:value={selected["sep_selection"]} label="Audit category" style="width: 90%">
+                                            {#each all_sep_options as opt}
+                                                <Option value={opt}>{opt}</Option>
+                                            {/each}
+                                        </Select>
+                                    </div>
                                 </div>
                             </div>
                             {/if}
@@ -452,55 +472,58 @@
 
         <div class="panel_footer">
             <div class="panel_footer_contents">
+                <!-- New button -->
                 <Button 
                     on:click={handleNewReport} 
                     variant="outlined" 
-                    color="secondary"
-                    style=""
                 >
                     <Label>New</Label>
                 </Button>
 
+                <!-- Delete button -->
                 <!-- <Button 
                     on:click={handleDeleteReport} 
                     variant="outlined" 
-                    color="secondary"
-                    style=""
                 >
                     <Label>Delete</Label>
                 </Button> -->
 
+                <!-- Save button -->
                 <Button 
                     on:click={handleSaveReport} 
                     variant="outlined" 
-                    color="secondary"
                 >
-                    <Label>Save</Label>
+                    <Label>
+                        {#await promise_save}
+                            <CircularProgress style="height: 13.5px; width: 13.5px;" indeterminate />
+                        {:then result}
+                            {#if result && save_check_visible}
+                            <span transition:fade>
+                                <Icon class="material-icons">check</Icon>
+                            </span>
+                            {/if}
+                        {:catch error}
+                            <span style="color: red">{error.message}</span>
+                        {/await}
+                        Save
+                    </Label>
                 </Button>
 
+                <!-- Send to Avid button -->
+                {#key has_complete_report}
                 <Button 
                     on:click={handleSubmitReport} 
                     variant="outlined"
-                    color="secondary"
                 >
-                    <Label>Send Reports</Label>
+                    <Label>Send Reports to AVID</Label>
                 </Button>
+                {/key}
+            </div>
 
-                <div>
-                    <span style="color: grey"><i>Last saved:
-                    {#await promise_save}
-                        <CircularProgress style="height: 32px; width: 32px;" indeterminate />
-                    {:then result}
-                        {#if result}
-                        {new Date().toLocaleTimeString()}
-                        {:else}
-                        —
-                        {/if}
-                    {:catch error}
-                        <p style="color: red">{error.message}</p>
-                    {/await}
-                    </i></span>
-                </div>
+            <div class="feedback_section">
+                <a href="https://forms.gle/vDXchpbBFjDeKjJA6" target="_blank" class="feedback_link">
+                    Share feedback about the tool
+                </a>
             </div>
         </div>
         {/if}
@@ -534,13 +557,23 @@
         background: #f3f3f3;
         z-index: 11;
         bottom: 0;
-        padding: 15px 0px;
+        padding: 5px 0px;
     }
     .panel_footer_contents {
-        /* padding: 0px 20px; */
         display: flex;
         justify-content: space-around;
         align-items: center;
+        padding: 5px 0px 10px 0px;
+    }
+    .feedback_section {
+        display: flex;
+        justify-content: space-around;
+        align-items: center;
+    }
+    .feedback_link {
+        color: var(--mdc-theme-secondary);
+        font-size: 10px;
+        text-decoration: underline;
     }
 
     :global(.mdc-button.user_button) {
@@ -551,18 +584,17 @@
 
     :global(.mdc-button.user_button span) {
         text-overflow: ellipsis;
-        white-space: nowrap;
         overflow: hidden;
     }
 
     .page_header {
         width: 100%;
         background: #e3d6fd;
-        /* padding: 21px 0; */
-        /* border-bottom: 1px solid #e3d6fd; */
         padding: 10.5px 0;
         position: relative;
-        display: inline-block;
+        display: flex;
+        align-items: center;
+        justify-content: space-around;
     }
 
     .page_header:before {
@@ -575,9 +607,11 @@
     }
 
     .hypotheses_header {
-        display: inline-block;
         width: 100%;
         padding: 10px 0;
         vertical-align: middle;
+        display: flex;
+        align-items: center;
+        justify-content: space-around;
     }
 </style>
