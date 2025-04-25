@@ -1,4 +1,6 @@
-FROM node:19
+FROM node@sha256:92f06fc13bcc09f1ddc51f6ebf1aa3d21a6532b74f076f224f188bc6b9317570
+
+RUN npm install -g npm@9.8.1
 
 # Change node user to 1001 to free up uid 1000
 RUN groupmod -g 1001 node \
@@ -25,8 +27,7 @@ RUN apt-get update \
 	&& pip3 install -r requirements.txt
 
 WORKDIR $HOME/app/indie_label_svelte
-RUN npm install --global rollup \
-	&& npm install --save-dev svelte rollup-plugin-svelte --legacy-peer-deps \
+RUN npm install --save-dev @rollup/plugin-commonjs --legacy-peer-deps \
 	&& npm run build
 
 WORKDIR $HOME/app/
